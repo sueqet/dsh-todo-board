@@ -29,7 +29,7 @@ const MODE_HINT = {
 }
 const MONO = 'ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace'
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.3.0'
+const BUILD = '0.3.1'
 
 const CSS = `
 .dshtb-root{position:fixed;top:56px;right:16px;z-index:2147482000;pointer-events:auto;

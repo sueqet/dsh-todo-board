@@ -61,6 +61,8 @@ Dispatch order is the panel's **top-to-bottom** order. Drag the `⠿` handle to 
 
 A `自动新会话` task opens its session once and **binds** it to the row: later ▶ presses and turn-end handoffs reuse that same session instead of opening another. Only a dead binding (the session was removed) — or clicking the `会话 … ✕` chip to unbind — makes the next dispatch open a fresh one.
 
+新会话会被登记进待办目录所属的**工作区**，侧栏里和手动开的会话一样归组（不是「未分组」）。
+
 ## 定时执行 / Scheduled execution
 
 每条待办都可以带一个**本地时间**（`YYYY-MM-DDTHH:mm`，分钟精度）。到点之前这条待办不会被派发；到点之后 DSH 按它自己的模式执行它 —— 就像你此刻按了 ▶ 一样。

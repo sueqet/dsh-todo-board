@@ -76,6 +76,27 @@ const presetsStub = {
   },
 }
 
+/** Records which sessions the plugin files under a workspace directory. */
+const attached = []
+const workspaces = new Map()
+
+const workspaceStub = {
+  async resolveByPath(path) {
+    return workspaces.get(path)
+  },
+  async create(path) {
+    const workspace = {
+      id: 'ws-' + (workspaces.size + 1),
+      path,
+      async attachSession(sessionId) {
+        attached.push({ workspaceId: this.id, path, sessionId })
+      },
+    }
+    workspaces.set(path, workspace)
+    return workspace
+  },
+}
+
 function makeCtx() {
   // `inject(['webServer'], cb)` hands cb a context where the service is a
   // property, so the stub exposes it both ways.
@@ -107,6 +128,7 @@ function makeCtx() {
       }
       if (key === 'agents') return agentsStub
       if (key === 'agentPresets') return presetsStub
+      if (key === 'workspaceRegistry') return workspaceStub
       if (key === 'webServer') return webServer
       return undefined
     },
@@ -375,6 +397,9 @@ assert.equal(firstRun.target, 'new-session')
 assert.equal(spawnedAgents.length, 1, 'exactly one session was created')
 assert.equal(firstRun.sessionId, spawnedAgents[0].id)
 assert.equal(spawnedAgents[0].sent.length, 1, 'the created session received the task')
+assert.equal(attached.length, 1, 'the created session is filed under a workspace')
+assert.equal(attached[0].sessionId, spawnedAgents[0].id)
+assert.equal(attached[0].path, DIR, 'the workspace is the todo directory')
 
 const snapshotResponse = fakeResponse()
 await registered.routes[0].handler({ method: 'GET' }, snapshotResponse)

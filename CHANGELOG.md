@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- **新会话归入工作区**：`自动新会话` 创建的会话现在会被登记到所属工作区（`workspaceRegistry.resolveByPath(dirPath)` + `attachSession`），侧栏不再把它列为「未分组」。分组是工作区记录上的 `sessionIds`，不是会话头字段——DSH 自己开会话时会 attach，而 `agents.create` 不会。
+- 分组失败不影响会话：目录为空、没有 workspaceRegistry 服务、或 attach 被拒（比如 cwd 校验不通过）时只记一条 warn，会话照常创建并派发。
+- 测试新增：断言新会话被 attach 到待办目录对应的工作区。
+
 ## 0.3.0
 
 - **新会话绑定**：`自动新会话` 的待办在第一次派发后把创建的会话 id 记到自己身上（`runSessionId`），之后 ▶ 或回合结束自动接续都**复用这个会话**，不再一次运行开一个会话；只有绑定失效（会话已不在）或用户手动解绑，才会再开一个新的。
