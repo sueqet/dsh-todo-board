@@ -11,10 +11,10 @@
 | 仓库根有 `cordis.patch.yml` | ✅ |
 | 仓库有真实可用代码 | ✅ |
 | 仓库创建满 **1 天**（CI 自动检查） | ⏳ 新建仓库当天不满足，第二天再提 |
-| 仓库加上 GitHub topic **`dsh-plugin`** | ⏳ 需要手工加（MCP 工具没有改 topic 的接口） |
+| 仓库加上 GitHub topic **`dsh-plugin`** | ✅ 已设置（`dsh-plugin` / `deepseek-harness` / `dsh` / `cordis` / `todo` / `task-board`） |
 | `@deepseek-ai/*` 用 `peerDependencies` 且预发布范围要带显式分支 | ✅ 只声明了 `@deepseek-ai/cordis: ^4.0.1`（非预发布，无需分支） |
 
-加 topic：
+topic 已通过 API 设置；如需再改：
 
 ```sh
 gh repo edit sueqet/dsh-todo-board --add-topic dsh-plugin
