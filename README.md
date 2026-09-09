@@ -57,6 +57,24 @@ dsh plugin --profile web remove dsh-todo-board
 
 Dispatch order is the panel's **top-to-bottom** order. Drag the `⠿` handle to change it; the order is persisted.
 
+## 定时执行 / Scheduled execution
+
+每条待办都可以带一个**本地时间**（`YYYY-MM-DDTHH:mm`，分钟精度）。到点之前这条待办不会被派发；到点之后 DSH 按它自己的模式执行它 —— 就像你此刻按了 ▶ 一样。
+
+Any task may carry a **local time** (`YYYY-MM-DDTHH:mm`, minute precision). Before that minute the task is not dispatched; when it arrives, DSH runs it in its own mode, exactly as if you had pressed ▶ at that moment.
+
+- 新增框里的「定时」一行用浏览器的时间选择器挑时间；留空 = 立即可执行。
+- 行上的定时标签显示时间，**已到点**会变黄；点它即取消定时。
+- `提醒` 模式到点只弹一条桌面通知（需要浏览器通知权限），不会自动给模型发消息；`自动续跑` / `自动新会话` 到点才真正派发。
+- 定时只判一次：派发过（或被提醒过）就不再重复触发。错过的时间（DSH 当时没运行）会在下次启动后立刻补上。
+- 时间用**主机本地时区**解释；面板存的就是你选的那一刻。
+
+- The composer's 定时 row uses the browser's own picker; empty means "runnable now".
+- The row chip shows the time and turns yellow once due; click it to clear the schedule.
+- `提醒` mode only raises a desktop notification at that minute (browser permission required); `自动续跑` / `自动新会话` dispatch for real.
+- A time fires once: a dispatched or reminded row never fires again. A time missed while DSH was not running fires on the next start.
+- Times are interpreted in the **host machine's local zone** — the board stores the instant you picked.
+
 ## 双勾选 / Two checkboxes
 
 | 勾 | 谁勾 | 含义 |
@@ -80,11 +98,12 @@ Only the right-hand box closes a task. The prompt section explicitly forbids the
 
 | action | 作用 |
 | --- | --- |
-| `list` | 列出当前工作目录下未验收的待办（`all: true` 列全部目录），带 id 与执行顺序 |
-| `add` | 新增一条（追加到列表底部） |
+| `list` | 列出当前工作目录下未验收的待办（`all: true` 列全部目录），带 id、执行顺序与定时时间 |
+| `add` | 新增一条（追加到列表底部），可带 `schedule` |
 | `done` | 打左勾「AI 已完成」 |
 | `reopen` | 撤销左勾 |
 | `note` | 追加备注 |
+| `schedule` | 设置或取消某条待办的定时时间（`schedule` 传空字符串即取消） |
 
 工具输出 schema 是 `additionalProperties: false` 的严格 JSON Schema，返回值只含声明过的字段。
 
@@ -126,6 +145,7 @@ npm test        # host 半边 smoke 自检
 - 浮窗每 2.5s 轮询一次 `/dsh-todo-board/api`，不是推送。
 - 待办板是全局单文件，不按目录分文件。
 - 「自动新会话」需要待办上的目录路径可创建。
+- 定时只支持**单次**的绝对时间，没有 cron / 周期规则；到点后「自动续跑」需要来源会话当时还在运行，否则按「没有可接续的活动会话」处理（改「自动新会话」可脱离会话存活）。
 - Cordis 入口是 DOM 桥接：按该插件自己渲染的 `data-cordis-badge` 属性定位，用带 `!important` 的规则覆盖它计算出的位置。DSH 升级若改了这套实现，桥接会失效——那时按钮会变灰并提示，不会静默失灵。
 
 ## License

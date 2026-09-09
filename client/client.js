@@ -88,6 +88,12 @@ const CSS = `
 .dshtb-dir input{width:100%;padding:6px 9px;border-radius:8px;border:1px dashed var(--tb-line);
   background:transparent;color:var(--tb-dim);font:inherit;font-size:12px;outline:none;
   transition:border-color .12s,color .12s}
+.dshtb-when{display:flex;align-items:center;gap:7px;font:600 11px/1 ${MONO};color:var(--tb-dim)}
+.dshtb-when .lbl{letter-spacing:.08em}
+.dshtb-when input{flex:1;min-width:0;padding:5px 8px;border-radius:8px;border:1px dashed var(--tb-line);
+  background:transparent;color:var(--tb-dim);font:inherit;font-size:12px;outline:none;
+  transition:border-color .12s,color .12s;color-scheme:dark light}
+.dshtb-when input:focus{border-style:solid;border-color:var(--tb-accent);color:var(--tb-ink)}
 .dshtb-dir input::placeholder{color:var(--tb-dim);opacity:.85}
 .dshtb-dir input:focus{border-style:solid;border-color:var(--tb-accent);color:var(--tb-ink)}
 .dshtb-list{overflow:auto;padding:2px 0 6px;scrollbar-width:thin}
@@ -135,6 +141,7 @@ const CSS = `
 button.dshtb-chip{cursor:pointer;font:inherit;color:inherit;transition:border-color .12s,color .12s}
 button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-chip.sent{color:var(--tb-ok);border-color:var(--tb-ok)}
+.dshtb-chip.due{color:var(--tb-warn);border-color:var(--tb-warn);font-weight:600}
 .dshtb-acts{display:flex;gap:1px;flex:0 0 auto;opacity:0;transition:opacity .12s}
 .dshtb-item:hover .dshtb-acts{opacity:1}
 .dshtb-ic{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;
@@ -386,6 +393,7 @@ function TodoBoard(props) {
   const [draft, setDraft] = React.useState('')
   const [mode, setMode] = React.useState('remind')
   const [dirInput, setDirInput] = React.useState('')
+  const [when, setWhen] = React.useState('')
   const [filter, setFilter] = React.useState('dir')
   const [busy, setBusy] = React.useState(false)
   const [dragId, setDragId] = React.useState('')
@@ -397,6 +405,8 @@ function TodoBoard(props) {
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
   const inputRef = React.useRef(null)
+  /** id -> remindedAt already surfaced, so a reminder notifies exactly once. */
+  const seenReminders = React.useRef({})
 
   function applyLayout(next) {
     const clamped = clampLayout(next)
@@ -465,6 +475,9 @@ function TodoBoard(props) {
       (result) => {
         setData(result)
         setErr('')
+        if (result !== null && result !== undefined && Array.isArray(result.todos)) {
+          notifyDue(result.todos)
+        }
       },
       (failure) => setErr(describe(failure)),
     )
@@ -477,6 +490,18 @@ function TodoBoard(props) {
     refresh()
     const id = window.setInterval(refresh, 2500)
     return () => window.clearInterval(id)
+  }, [])
+
+  // Ask once for desktop-notification permission, so a due 「提醒」待办 can
+  // surface even while the panel is collapsed.
+  React.useEffect(() => {
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {})
+      }
+    } catch (err) {
+      /* no Notification API in this engine */
+    }
   }, [])
 
   const todos = data !== null && data !== undefined && Array.isArray(data.todos) ? data.todos : []
@@ -523,13 +548,40 @@ function TodoBoard(props) {
     if (title === '') return
     const targetDir = dirInput.trim() !== '' ? dirInput.trim() : cwd
     setDraft('')
+    setWhen('')
     call('create', {
       title,
       mode,
       dir: targetDir,
+      schedule: when,
       sessionId: currentId === undefined ? '' : currentId,
       sessionTitle: currentTitle,
     })
+  }
+
+  function setSchedule(todo, value) {
+    patch(todo.id, { schedule: value })
+  }
+
+  /** One desktop notification per reminder the host has stamped as due. */
+  function notifyDue(list) {
+    for (const todo of list) {
+      const stamp = typeof todo.remindedAt === 'number' ? todo.remindedAt : 0
+      if (stamp === 0) {
+        delete seenReminders.current[todo.id]
+        continue
+      }
+      if (seenReminders.current[todo.id] === stamp) continue
+      seenReminders.current[todo.id] = stamp
+      if (todo.verified) continue
+      try {
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          new Notification('TODO 到时间了', { body: todo.title, tag: 'dshtb-' + todo.id })
+        }
+      } catch (err) {
+        /* notification blocked: the row chip still shows 已到时间 */
+      }
+    }
   }
 
   function patch(id, p) {
@@ -592,6 +644,23 @@ function TodoBoard(props) {
     )
     if (todo.dispatchedAt > 0 && !todo.aiDone) {
       meta.push(h('span', { className: 'dshtb-chip sent', key: 's', title: '已经派发过一次' }, '已派发'))
+    }
+    if (todo.schedule) {
+      const due = typeof todo.dueAt === 'number' && todo.dueAt > 0 && todo.dueAt <= Date.now()
+      meta.push(
+        h(
+          'button',
+          {
+            className: 'dshtb-chip' + (due ? ' due' : ''),
+            key: 'w',
+            title: due
+              ? '已到时间：' + todo.schedule + '（点 ✕ 取消定时）'
+              : '定时执行：' + todo.schedule + '（点 ✕ 取消定时）',
+            onClick: () => setSchedule(todo, ''),
+          },
+          (due ? '\u23F0 ' : '\u25F4 ') + todo.schedule.slice(5).replace('T', ' ') + ' ✕',
+        ),
+      )
     }
     if (todo.sourceSessionTitle) {
       meta.push(h('span', { className: 'dshtb-chip', key: 't' }, todo.sourceSessionTitle))
@@ -851,6 +920,28 @@ function TodoBoard(props) {
           ),
         ),
         h('div', { className: 'dshtb-hint' }, MODE_HINT[mode]),
+        h(
+          'div',
+          { className: 'dshtb-when' },
+          h('span', { className: 'lbl' }, '定时'),
+          h('input', {
+            type: 'datetime-local',
+            value: when,
+            title: '到点后才执行（留空 = 立即可以执行）',
+            onChange: (e) => setWhen(e.target.value),
+          }),
+          when !== ''
+            ? h(
+                'button',
+                {
+                  className: 'dshtb-ic',
+                  title: '取消定时',
+                  onClick: () => setWhen(''),
+                },
+                '\u2715',
+              )
+            : h('span', { className: 'dshtb-hint' }, '不填'),
+        ),
         h(
           'div',
           { className: 'dshtb-dir' },

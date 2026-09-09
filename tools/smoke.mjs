@@ -2,8 +2,8 @@
  * Host-half smoke test for dsh-todo-board.
  *
  * Loads lib/index.js against a stubbed Cordis context and a throwaway DSH_HOME,
- * then exercises apply(), the todo_board tool, the HTTP route, persistence and
- * the top-to-bottom ordering rule.
+ * then exercises apply(), the todo_board tool, the HTTP route, persistence, the
+ * top-to-bottom ordering rule and scheduled execution.
  *
  *   node tools/smoke.mjs
  */
@@ -19,6 +19,20 @@ process.env.DSH_HOME = home
 const mod = await import('../lib/index.js')
 
 const registered = { tool: null, section: null, routes: [], listeners: [], effects: [] }
+
+const DIR = 'D:\\smoke\\project'
+const agent = {
+  id: 'session-smoke',
+  session: { header: { id: 'session-smoke', cwd: DIR } },
+  sent: [],
+  followup(message) {
+    this.sent.push(message)
+  },
+  steer(message) {
+    this.sent.push(message)
+  },
+}
+const exec = { agent }
 
 function makeCtx() {
   // `inject(['webServer'], cb)` hands cb a context where the service is a
@@ -49,7 +63,7 @@ function makeCtx() {
           },
         }
       }
-      if (key === 'agents') return { list: () => [], get: () => undefined }
+      if (key === 'agents') return { list: () => [agent], get: (id) => (id === agent.id ? agent : undefined) }
       if (key === 'webServer') return webServer
       return undefined
     },
@@ -70,10 +84,6 @@ function makeCtx() {
   return ctx
 }
 
-const DIR = 'D:\\smoke\\project'
-const agent = { id: 'session-smoke', session: { header: { cwd: DIR } } }
-const exec = { agent }
-
 function fakeResponse() {
   const box = { status: 0, body: '' }
   return {
@@ -84,6 +94,22 @@ function fakeResponse() {
     end(body) {
       box.body = body === undefined ? '' : String(body)
     },
+  }
+}
+
+/** Local `YYYY-MM-DDTHH:mm`, the board's schedule format. */
+function localStamp(ms) {
+  const date = new Date(ms)
+  const pad = (n) => String(n).padStart(2, '0')
+  return (
+    date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) +
+    'T' + pad(date.getHours()) + ':' + pad(date.getMinutes())
+  )
+}
+
+function turnStopping() {
+  for (const entry of registered.listeners) {
+    if (entry.event === 'agent/turn-stopping') entry.listener({ agent })
   }
 }
 
@@ -114,10 +140,11 @@ const added = await registered.tool.execute(
 assert.equal(added.todos.length, 1)
 assert.equal(added.todos[0].title, '第二条')
 assert.equal(added.todos[0].mode, 'resume')
+assert.equal(added.todos[0].schedule, '', 'a plain add carries no schedule')
 assert.equal(added.todos[0].aiDone, false)
 assert.deepEqual(
   Object.keys(added.todos[0]).sort(),
-  ['aiDone', 'dirLabel', 'id', 'mode', 'title', 'verified'],
+  ['aiDone', 'dirLabel', 'id', 'mode', 'schedule', 'title', 'verified'],
   'tool rows carry exactly the declared schema keys',
 )
 const firstId = added.todos[0].id
@@ -176,6 +203,8 @@ assert.equal(snapshot2.ok, true)
 assert.equal(snapshot2.todos.length, 2)
 assert.ok(snapshot2.storagePath.endsWith('board.json'))
 assert.ok(snapshot2.todos.every((todo) => typeof todo.order === 'number'))
+assert.ok(snapshot2.todos.every((todo) => typeof todo.schedule === 'string'))
+assert.ok(snapshot2.todos.every((todo) => typeof todo.dueAt === 'number'), 'panel rows expose dueAt')
 
 const patched = await postJson({ action: 'patch', id: firstId, patch: { verified: true } })
 assert.equal(patched.ok, true)
@@ -193,6 +222,96 @@ assert.equal(onDisk.todos[0].id, ids[1], 'disk order matches the reordered order
 assert.equal(onDisk.todos[0].order, 0)
 assert.equal(onDisk.todos[1].order, 1)
 console.log('persist OK')
+
+// ---------------------------------------------------------------- schedule
+
+// Created the way the panel creates it: bound to a session, so a scheduled
+// `resume` row has somewhere to land when its time comes.
+const startCount = agent.sent.length
+const minuteStart = Math.floor(Date.now() / 60000) * 60000
+const created = await postJson({
+  action: 'create',
+  title: '到点再干',
+  mode: 'resume',
+  dir: DIR,
+  sessionId: agent.id,
+  schedule: localStamp(minuteStart + 60000),
+})
+assert.equal(created.ok, true, 'create accepts a schedule')
+const scheduledId = created.todo.id
+assert.equal(created.todo.schedule, localStamp(minuteStart + 60000), 'a local stamp round-trips')
+assert.equal(created.todo.dueAt, minuteStart + 60000, 'dueAt mirrors the stamp')
+assert.equal(agent.sent.length, startCount, 'a future row does not fire on creation')
+
+const rejected = await postJson({ action: 'create', title: '坏时间', dir: DIR, schedule: 'nonsense' })
+assert.equal(rejected.ok, false, 'create refuses an unparseable schedule')
+
+const byTool = await registered.tool.execute(
+  { action: 'schedule', id: scheduledId, schedule: localStamp(minuteStart + 7200000) },
+  exec,
+)
+assert.equal(byTool.todos[0].schedule, localStamp(minuteStart + 7200000), 'schedule action moves the time')
+await registered.tool.execute({ action: 'schedule', id: scheduledId, schedule: '' }, exec)
+assert.equal(
+  (await registered.tool.execute({ action: 'list' }, exec)).todos.find((todo) => todo.id === scheduledId)
+    .schedule,
+  '',
+  'an empty schedule clears the timer',
+)
+await registered.tool.execute({ action: 'schedule', id: scheduledId, schedule: 'not-a-date' }, exec)
+assert.equal(
+  (await registered.tool.execute({ action: 'list' }, exec)).todos.find((todo) => todo.id === scheduledId)
+    .schedule,
+  '',
+  'an unparseable schedule never arms a wrong instant',
+)
+
+// A future time must hold the row back at turn end, even though it sits above
+// every other pending row in this directory.
+await registered.tool.execute(
+  { action: 'schedule', id: scheduledId, schedule: localStamp(minuteStart + 7200000) },
+  exec,
+)
+await registered.tool.execute({ action: 'done', id: ids[0] }, exec)
+await registered.tool.execute({ action: 'done', id: ids[1] }, exec)
+const gatedCount = agent.sent.length
+await registered.tool.execute({ action: 'add', title: '没有定时的一条', mode: 'resume' }, exec)
+const boardOrder = (await registered.tool.execute({ action: 'list' }, exec)).todos
+assert.equal(
+  boardOrder.findIndex((todo) => todo.id === scheduledId) <
+    boardOrder.findIndex((todo) => todo.title === '没有定时的一条'),
+  true,
+  'the future row really is the topmost pending row',
+)
+turnStopping()
+assert.equal(agent.sent.length, gatedCount + 1, 'turn end dispatches the next todo that is actually due')
+assert.ok(
+  agent.sent[gatedCount].content[0].text.includes('没有定时的一条'),
+  'turn end steps over the not-yet-due row instead of running it',
+)
+assert.equal(
+  (await registered.tool.execute({ action: 'list' }, exec)).todos.find((todo) => todo.id === scheduledId)
+    .schedule,
+  localStamp(minuteStart + 7200000),
+  'the future row keeps its schedule',
+)
+
+// Moving the time into the past re-arms the timer, which dispatches the row and
+// records it so nothing can fire twice.
+await registered.tool.execute({ action: 'schedule', id: scheduledId, schedule: localStamp(minuteStart) }, exec)
+assert.equal(agent.sent.length, gatedCount + 2, 'a due todo dispatches through the timer')
+assert.ok(
+  agent.sent[gatedCount + 1].content[0].text.includes('到点再干'),
+  'the dispatched prompt carries the todo title',
+)
+assert.equal(
+  JSON.parse(readFileSync(join(home, 'todo-board', 'board.json'), 'utf8')).todos.find(
+    (todo) => todo.id === scheduledId,
+  ).dispatchedAt > 0,
+  true,
+  'dispatch is persisted, so it can never fire twice',
+)
+console.log('schedule OK')
 
 rmSync(home, { recursive: true, force: true })
 console.log('\nall host-half smoke checks passed')
