@@ -3,7 +3,7 @@
  *
  * Loads lib/index.js against a stubbed Cordis context and a throwaway DSH_HOME,
  * then exercises apply(), the todo_board tool, the HTTP route, persistence, the
- * top-to-bottom ordering rule and scheduled execution.
+ * top-to-bottom ordering rule, scheduled execution and newSession binding.
  *
  *   node tools/smoke.mjs
  */
@@ -34,6 +34,48 @@ const agent = {
 }
 const exec = { agent }
 
+/** Live agents the stub registry knows about: the origin session plus spawned ones. */
+const live = new Map([[agent.id, agent]])
+const spawnedAgents = []
+
+function spawnStubAgent(id) {
+  const spawned = {
+    id,
+    status: 'idle',
+    session: { header: { id, cwd: DIR } },
+    sent: [],
+    followup(message) {
+      this.sent.push(message)
+    },
+    steer(message) {
+      this.sent.push(message)
+    },
+  }
+  live.set(spawned.id, spawned)
+  spawnedAgents.push(spawned)
+  return spawned
+}
+
+const agentsStub = {
+  list: () => [...live.values()],
+  get: (id) => live.get(id),
+  async create(options) {
+    // The factory is handed the caller's session id; honour it like the real one.
+    const spawned = spawnStubAgent(options.sessionId)
+    if (typeof options.setup === 'function') await options.setup({})
+    return { agent: spawned, dispose: async () => {} }
+  },
+}
+
+const presetsStub = {
+  async resolve() {
+    return { id: 'standard' }
+  },
+  async mount() {
+    return { id: 'standard' }
+  },
+}
+
 function makeCtx() {
   // `inject(['webServer'], cb)` hands cb a context where the service is a
   // property, so the stub exposes it both ways.
@@ -63,7 +105,8 @@ function makeCtx() {
           },
         }
       }
-      if (key === 'agents') return { list: () => [agent], get: (id) => (id === agent.id ? agent : undefined) }
+      if (key === 'agents') return agentsStub
+      if (key === 'agentPresets') return presetsStub
       if (key === 'webServer') return webServer
       return undefined
     },
@@ -312,6 +355,47 @@ assert.equal(
   'dispatch is persisted, so it can never fire twice',
 )
 console.log('schedule OK')
+
+// ------------------------------------------------------- newSession binding
+
+// The first run opens a session and binds it; the second run must reuse that
+// binding instead of opening yet another session.
+const spawnedTodo = await postJson({
+  action: 'create',
+  title: '新会话只开一次',
+  mode: 'newSession',
+  dir: DIR,
+  sessionId: agent.id,
+})
+assert.equal(spawnedTodo.ok, true)
+const boundId = spawnedTodo.todo.id
+const firstRun = await postJson({ action: 'run', id: boundId, sessionId: agent.id })
+assert.equal(firstRun.ok, true, 'the first run opens a session')
+assert.equal(firstRun.target, 'new-session')
+assert.equal(spawnedAgents.length, 1, 'exactly one session was created')
+assert.equal(firstRun.sessionId, spawnedAgents[0].id)
+assert.equal(spawnedAgents[0].sent.length, 1, 'the created session received the task')
+
+const snapshotResponse = fakeResponse()
+await registered.routes[0].handler({ method: 'GET' }, snapshotResponse)
+const panelRow = JSON.parse(snapshotResponse.box.body).todos.find((todo) => todo.id === boundId)
+assert.equal(panelRow.runSessionId, spawnedAgents[0].id, 'the created session is bound on the row')
+
+const secondRun = await postJson({ action: 'run', id: boundId, sessionId: agent.id })
+assert.equal(secondRun.ok, true, 'the second run succeeds')
+assert.equal(secondRun.target, 'session', 'the second run reuses the binding')
+assert.equal(secondRun.sessionId, spawnedAgents[0].id)
+assert.equal(spawnedAgents.length, 1, 'no second session is created')
+assert.equal(spawnedAgents[0].sent.length, 2, 'the bound session got the task again')
+
+// Unbinding is what re-enables opening a fresh session.
+const unbound = await postJson({ action: 'patch', id: boundId, patch: { runSessionId: '' } })
+assert.equal(unbound.ok, true)
+assert.equal(unbound.todo.runSessionId, '', 'the panel can drop the binding')
+const thirdRun = await postJson({ action: 'run', id: boundId, sessionId: agent.id })
+assert.equal(thirdRun.target, 'new-session', 'after unbinding a new session is opened again')
+assert.equal(spawnedAgents.length, 2, 'unbinding really allows a second session')
+console.log('binding OK')
 
 rmSync(home, { recursive: true, force: true })
 console.log('\nall host-half smoke checks passed')

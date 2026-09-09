@@ -57,6 +57,10 @@ dsh plugin --profile web remove dsh-todo-board
 
 Dispatch order is the panel's **top-to-bottom** order. Drag the `⠿` handle to change it; the order is persisted.
 
+「自动新会话」第一次派发时创建会话，并把它**绑定**到这条待办上：之后 ▶ 或回合结束自动接续都复用同一个会话，不会一次运行开一个会话。绑定会话已不在（比如你把它删了）时，下一次派发才会再开一个新的；想手动换一个新会话，点行上的 `会话 … ✕` 解绑即可。
+
+A `自动新会话` task opens its session once and **binds** it to the row: later ▶ presses and turn-end handoffs reuse that same session instead of opening another. Only a dead binding (the session was removed) — or clicking the `会话 … ✕` chip to unbind — makes the next dispatch open a fresh one.
+
 ## 定时执行 / Scheduled execution
 
 每条待办都可以带一个**本地时间**（`YYYY-MM-DDTHH:mm`，分钟精度）。到点之前这条待办不会被派发；到点之后 DSH 按它自己的模式执行它 —— 就像你此刻按了 ▶ 一样。

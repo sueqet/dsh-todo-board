@@ -28,6 +28,8 @@ const MODE_HINT = {
   newSession: 'AI 一停就自动新建一个同目录会话来执行。',
 }
 const MONO = 'ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace'
+/** Bumped whenever the browser half changes, so the footer proves which build is live. */
+const BUILD = '0.3.0'
 
 const CSS = `
 .dshtb-root{position:fixed;top:56px;right:16px;z-index:2147482000;pointer-events:auto;
@@ -131,6 +133,8 @@ const CSS = `
 @keyframes dshtb-pop{0%{transform:scale(.55)}60%{transform:scale(1.18)}100%{transform:scale(1)}}
 .dshtb-body{flex:1;min-width:0}
 .dshtb-t{font-size:13px;word-break:break-word;white-space:pre-wrap;line-height:1.45}
+.dshtb-facts{margin-top:3px;font:400 11px/1.4 ${MONO};font-variant-numeric:tabular-nums;
+  color:var(--tb-dim);word-break:break-all}
 .dshtb-t input{width:100%;padding:2px 5px;border-radius:5px;border:1px solid var(--tb-accent);
   background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);font:inherit;outline:none}
 .dshtb-meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;
@@ -142,6 +146,7 @@ button.dshtb-chip{cursor:pointer;font:inherit;color:inherit;transition:border-co
 button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-chip.sent{color:var(--tb-ok);border-color:var(--tb-ok)}
 .dshtb-chip.due{color:var(--tb-warn);border-color:var(--tb-warn);font-weight:600}
+.dshtb-chip.bound{color:var(--tb-accent);border-color:var(--tb-accent)}
 .dshtb-acts{display:flex;gap:1px;flex:0 0 auto;opacity:0;transition:opacity .12s}
 .dshtb-item:hover .dshtb-acts{opacity:1}
 .dshtb-ic{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;
@@ -628,7 +633,17 @@ function TodoBoard(props) {
     if (overId === todo.id && dragId !== '' && dragId !== todo.id) cls += ' over'
 
     const meta = [
-      h('span', { className: 'dshtb-chip', key: 'd', title: todo.dirPath || todo.dir }, todo.dirLabel),
+      h(
+        'span',
+        {
+          className: 'dshtb-chip',
+          key: 'd',
+          title: todo.dirPath
+            ? '工作目录：' + todo.dirPath
+            : '这条待办没有绑定目录（新增时目录留空且当前会话没有工作区）',
+        },
+        todo.dirLabel,
+      ),
     ]
     meta.push(
       h(
@@ -665,6 +680,25 @@ function TodoBoard(props) {
     if (todo.sourceSessionTitle) {
       meta.push(h('span', { className: 'dshtb-chip', key: 't' }, todo.sourceSessionTitle))
     }
+    // A `newSession` row owns the session it opened. Showing the binding makes
+    // it obvious that pressing ▶ again reuses that session instead of opening
+    // yet another one; ✕ drops the binding so the next run opens a fresh one.
+    if (todo.mode === 'newSession' && todo.runSessionId) {
+      meta.push(
+        h(
+          'button',
+          {
+            className: 'dshtb-chip bound',
+            key: 'b',
+            title:
+              '已绑定会话：' + todo.runSessionId +
+              '\n▶ 会把待办发到这个会话，不会新开；点 ✕ 解绑，下次重新开一个新会话',
+            onClick: () => patch(todo.id, { runSessionId: '' }),
+          },
+          '会话 ' + todo.runSessionId.slice(-6) + ' ✕',
+        ),
+      )
+    }
 
     const titleNode =
       editId === todo.id
@@ -680,6 +714,17 @@ function TodoBoard(props) {
             },
           })
         : h('div', { className: 'dshtb-t', title: '双击编辑', onDoubleClick: () => beginEdit(todo) }, todo.title)
+
+    // A plain monospace readout under the title: the two facts the chips can
+    // bury in a narrow panel are always visible here — the working directory
+    // this task runs in, and the time it is scheduled for.
+    const facts = []
+    facts.push('目录 ' + (todo.dirPath || todo.dir || '(未指定)'))
+    facts.push(todo.schedule ? '定时 ' + todo.schedule : '不定时')
+    if (todo.runSessionId && todo.mode !== 'newSession') {
+      facts.push('会话 ' + todo.runSessionId.slice(-6))
+    }
+    const detailNode = h('div', { className: 'dshtb-facts' }, facts.join('  ·  '))
 
     return h(
       'div',
@@ -737,7 +782,7 @@ function TodoBoard(props) {
           todo.verified ? '\u2713' : '',
         ),
       ),
-      h('div', { className: 'dshtb-body' }, titleNode, h('div', { className: 'dshtb-meta' }, meta)),
+      h('div', { className: 'dshtb-body' }, titleNode, detailNode, h('div', { className: 'dshtb-meta' }, meta)),
       h(
         'div',
         { className: 'dshtb-acts' },
@@ -971,6 +1016,7 @@ function TodoBoard(props) {
       h(
         'div',
         { className: 'dshtb-foot' },
+        h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
         h('span', null, '未验收 ' + openCount),
         awaitingVerify > 0 ? h('span', null, '· 待验 ' + awaitingVerify) : null,
         h('span', { className: 'dshtb-sp' }),
