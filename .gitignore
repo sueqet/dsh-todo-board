@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# dsh local state
+.dsh-todo-board.json
+board.json
