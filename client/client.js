@@ -151,6 +151,13 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-link{padding:2px 6px;border:1px solid var(--tb-line);border-radius:6px;background:transparent;
   color:var(--tb-dim);font:inherit;cursor:pointer;transition:background .12s,color .12s,border-color .12s}
 .dshtb-link:hover{background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);border-color:var(--tb-line2)}
+.dshtb-link.off{opacity:.5;cursor:not-allowed}
+/* Shipped Cordis popup: parked under this panel, right-aligned to it.
+   !important beats the inline left/bottom the panel computes from its anchor. */
+[data-dsh-todo-cordis]>div:first-child{left:auto !important;bottom:auto !important;
+  right:var(--dsh-todo-cordis-right,16px) !important;
+  top:var(--dsh-todo-cordis-top,120px) !important;
+  max-height:var(--dsh-todo-cordis-maxh,60vh) !important}
 .dshtb-err{padding:6px 12px;color:var(--dsw-alias-state-error-primary);font:400 10.5px/1.4 ${MONO};
   word-break:break-all;border-top:1px solid var(--tb-line)}
 .dshtb-pill{display:inline-flex;align-items:center;gap:7px;padding:7px 12px 7px 10px;border-radius:999px;
@@ -162,6 +169,133 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
   color:#fff;font:700 10px/1 ${MONO};font-variant-numeric:tabular-nums;display:inline-grid;place-items:center}
 .dshtb-badge.warn{background:var(--tb-warn)}
 `
+
+// ---------------------------------------------------------------------------
+// Bridge to the shipped Cordis dynamic-plugin panel.
+//
+// That panel belongs to @deepseek-ai/dsh-client-ui-cordis and lives in the
+// sidebar footer. No slot API can move another plugin's entry, so this is a
+// DOM bridge with three parts:
+//
+//   1. locate the trigger by the `data-cordis-badge` attribute it renders
+//      itself — stable across versions and locales, and still present when the
+//      sidebar collapses to the 56px rail, where the text label is not
+//      rendered at all (text matching is only a fallback);
+//   2. hide its sidebar row, so the entry exists only inside this panel;
+//   3. park the shipped popup UNDER this panel: the popup is a child of that
+//      same layer, and a tagged, !important CSS rule overrides the inline
+//      `left`/`bottom` the panel computes from the layer's rect. That makes the
+//      placement independent of the collapsed anchor and guarantees the two
+//      panels never overlap.
+//
+// The layer's inline styles and attribute are restored when this plugin
+// unloads.
+// ---------------------------------------------------------------------------
+const CORDIS_TRIGGER = 'Cordis Plugin'
+const CORDIS_BADGE_SELECTOR = 'button[data-cordis-badge]'
+const CORDIS_LAYER_ATTR = 'data-dsh-todo-cordis'
+let cordisSaved = null
+
+function cordisBadge() {
+  const direct = document.querySelector(CORDIS_BADGE_SELECTOR)
+  if (direct !== null) return direct
+  const buttons = document.querySelectorAll('button')
+  for (const button of buttons) {
+    // Never match this panel's own footer entry: it carries the same label.
+    if (button.closest('.dshtb-root') !== null) continue
+    const text = button.textContent === null ? '' : button.textContent.trim()
+    // Prefix match: the shipped badge appends a running count.
+    if (text.indexOf(CORDIS_TRIGGER) === 0) return button
+  }
+  return null
+}
+
+function collapseCordisFooter() {
+  if (cordisSaved !== null && cordisSaved.button.isConnected) return
+  const badge = cordisBadge()
+  if (badge === null) return
+  const row = badge.parentElement
+  const layer = row === null ? null : row.parentElement
+  // Refuse to touch any ancestor of this panel: collapsing our own card would
+  // hide the entire board behind its own overflow:hidden.
+  const owner = layer === null ? row : layer
+  if (owner === null || owner.querySelector('.dshtb-root') !== null) return
+  cordisSaved = {
+    button: badge,
+    row,
+    layer,
+    rowDisplay: row === null ? '' : row.style.display,
+    layerHeight: layer === null ? '' : layer.style.height,
+    layerMargin: layer === null ? '' : layer.style.margin,
+    layerPadding: layer === null ? '' : layer.style.padding,
+  }
+  if (row !== null) row.style.display = 'none'
+  if (layer !== null) {
+    layer.style.height = '0px'
+    layer.style.margin = '0px'
+    layer.style.padding = '0px'
+    layer.setAttribute(CORDIS_LAYER_ATTR, '')
+  }
+}
+
+/**
+ * Keep the shipped popup parked directly under this panel, right-aligned to
+ * it, with a max-height that stops it running off the bottom of the viewport.
+ * Recomputed on every poll so dragging or resizing this panel moves it too.
+ */
+function anchorCordisPanel() {
+  const layer = cordisSaved === null ? null : cordisSaved.layer
+  if (layer === null || !layer.isConnected) return
+  const root = document.querySelector('.dshtb-root')
+  if (root === null) return
+  const rect = root.getBoundingClientRect()
+  const gap = 8
+  layer.style.setProperty('--dsh-todo-cordis-right', Math.max(8, Math.round(window.innerWidth - rect.right)) + 'px')
+  layer.style.setProperty('--dsh-todo-cordis-top', Math.round(rect.bottom + gap) + 'px')
+  layer.style.setProperty(
+    '--dsh-todo-cordis-maxh',
+    Math.max(160, Math.round(window.innerHeight - rect.bottom - gap * 3)) + 'px',
+  )
+}
+
+function restoreCordisFooter() {
+  if (cordisSaved === null) return
+  const saved = cordisSaved
+  cordisSaved = null
+  if (saved.row !== null && saved.row.isConnected) saved.row.style.display = saved.rowDisplay
+  if (saved.layer !== null && saved.layer.isConnected) {
+    saved.layer.style.height = saved.layerHeight
+    saved.layer.style.margin = saved.layerMargin
+    saved.layer.style.padding = saved.layerPadding
+    saved.layer.removeAttribute(CORDIS_LAYER_ATTR)
+  }
+}
+
+/**
+ * Open — never toggle — the shipped panel from this one.
+ *
+ * The badge sits inside a collapsed row, so a bare `.click()` races the
+ * panel's own dismiss-on-outside-pointer hook: that hook sees a pointer
+ * outside its root and closes whatever we just opened. Priming the interaction
+ * with a pointerdown/mousedown dispatched ON the badge makes the target
+ * "inside", so the click survives.
+ *
+ * @returns whether the shipped trigger was found at all.
+ */
+function openCordisPanel() {
+  const badge = cordisBadge()
+  if (badge === null) return false
+  if (badge.getAttribute('aria-expanded') === 'true') return true
+  try {
+    const options = { bubbles: true, cancelable: true, view: window }
+    badge.dispatchEvent(new PointerEvent('pointerdown', options))
+    badge.dispatchEvent(new MouseEvent('mousedown', options))
+  } catch (err) {
+    /* no PointerEvent in this engine: the plain click below still tries */
+  }
+  badge.click()
+  return true
+}
 
 // --------------------------------------------------------------- transport
 
@@ -259,6 +393,7 @@ function TodoBoard(props) {
   const [editId, setEditId] = React.useState('')
   const [editText, setEditText] = React.useState('')
   const [layout, setLayout] = React.useState(loadLayout)
+  const [cordisFound, setCordisFound] = React.useState(true)
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
   const inputRef = React.useRef(null)
@@ -333,6 +468,9 @@ function TodoBoard(props) {
       },
       (failure) => setErr(describe(failure)),
     )
+    collapseCordisFooter()
+    anchorCordisPanel()
+    setCordisFound(cordisBadge() !== null)
   }
 
   React.useEffect(() => {
@@ -756,6 +894,17 @@ function TodoBoard(props) {
               '清理已验收 ' + verifiedCount,
             )
           : null,
+        h(
+          'button',
+          {
+            className: 'dshtb-link' + (cordisFound ? '' : ' off'),
+            title: cordisFound
+              ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
+              : '找不到 Cordis 入口，暂时打不开',
+            onClick: openCordisPanel,
+          },
+          'Cordis Plugin',
+        ),
       ),
       h('div', {
         className: 'dshtb-resize',
@@ -785,6 +934,8 @@ exports.apply = function apply(ctx) {
     },
     'dsh-todo-board: styles',
   )
+
+  ctx.effect(() => () => restoreCordisFooter(), 'dsh-todo-board: cordis bridge')
 
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register(
