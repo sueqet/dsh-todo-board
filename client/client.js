@@ -163,75 +163,6 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-badge.warn{background:var(--tb-warn)}
 `
 
-// ---------------------------------------------------------------------------
-// Bridge to the shipped Cordis dynamic-plugin panel.
-//
-// Its trigger is a sidebar-footer button whose text is exactly "Cordis Plugin"
-// in every locale (see the ui-cordis dictionaries), so this match stays stable
-// across versions without touching hashed CSS-module class names. The entry is
-// surfaced inside this panel instead, and its sidebar row is collapsed — the
-// button stays in the DOM so the shipped popup, which anchors off the layer's
-// rect, still opens where it always did. Restored on plugin unload.
-// ---------------------------------------------------------------------------
-const CORDIS_TRIGGER = 'Cordis Plugin'
-let cordisSaved = null
-
-function cordisTrigger() {
-  const buttons = document.querySelectorAll('button')
-  for (const button of buttons) {
-    // Never match this panel's own footer entry: it carries the same label.
-    if (button.closest('.dshtb-root') !== null) continue
-    const text = button.textContent === null ? '' : button.textContent.trim()
-    // Prefix match: the shipped badge appends a count, e.g. "Cordis Plugin2".
-    if (text.indexOf(CORDIS_TRIGGER) === 0) return button
-  }
-  return null
-}
-
-function collapseCordisFooter() {
-  if (cordisSaved !== null && cordisSaved.button.isConnected) return
-  const button = cordisTrigger()
-  if (button === null) return
-  const row = button.parentElement
-  const layer = row === null ? null : row.parentElement
-  // Refuse to touch any ancestor of this panel: collapsing our own card would
-  // hide the entire board behind its own overflow:hidden.
-  const owner = layer === null ? row : layer
-  if (owner === null || owner.querySelector('.dshtb-root') !== null) return
-  cordisSaved = {
-    button,
-    row,
-    layer,
-    rowDisplay: row === null ? '' : row.style.display,
-    layerHeight: layer === null ? '' : layer.style.height,
-    layerMargin: layer === null ? '' : layer.style.margin,
-    layerPadding: layer === null ? '' : layer.style.padding,
-  }
-  if (row !== null) row.style.display = 'none'
-  if (layer !== null) {
-    layer.style.height = '0px'
-    layer.style.margin = '0px'
-    layer.style.padding = '0px'
-  }
-}
-
-function restoreCordisFooter() {
-  if (cordisSaved === null) return
-  const saved = cordisSaved
-  cordisSaved = null
-  if (saved.row !== null && saved.row.isConnected) saved.row.style.display = saved.rowDisplay
-  if (saved.layer !== null && saved.layer.isConnected) {
-    saved.layer.style.height = saved.layerHeight
-    saved.layer.style.margin = saved.layerMargin
-    saved.layer.style.padding = saved.layerPadding
-  }
-}
-
-function openCordisPanel() {
-  const button = cordisTrigger()
-  if (button !== null) button.click()
-}
-
 // --------------------------------------------------------------- transport
 
 async function request(method, body) {
@@ -402,7 +333,6 @@ function TodoBoard(props) {
       },
       (failure) => setErr(describe(failure)),
     )
-    collapseCordisFooter()
   }
 
   React.useEffect(() => {
@@ -826,15 +756,6 @@ function TodoBoard(props) {
               '清理已验收 ' + verifiedCount,
             )
           : null,
-        h(
-          'button',
-          {
-            className: 'dshtb-link',
-            title: '打开 Cordis 动态插件面板（入口已从侧边栏底部移到这里）',
-            onClick: openCordisPanel,
-          },
-          'Cordis Plugin',
-        ),
       ),
       h('div', {
         className: 'dshtb-resize',
@@ -864,8 +785,6 @@ exports.apply = function apply(ctx) {
     },
     'dsh-todo-board: styles',
   )
-
-  ctx.effect(() => () => restoreCordisFooter(), 'dsh-todo-board: cordis bridge')
 
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register(

@@ -74,7 +74,6 @@ Only the right-hand box closes a task. The prompt section explicitly forbids the
 - **筛选**：当前目录 / 当前会话 / 全部，每段带未完成计数。
 - **行内编辑**：双击标题改名；点模式标签在 提醒 → 续跑 → 新会话 之间循环切换。
 - **多行输入**：新增框自动增高（3 行起步，最高 180px），`Enter` 添加、`Shift+Enter` 换行。
-- **Cordis 入口**：侧边栏底部的 `Cordis Plugin` 按钮折起，入口移到面板底部；点它打开原面板，插件卸载时恢复侧边栏原状。
 
 ## 模型工具 / The `todo_board` tool
 
@@ -126,7 +125,6 @@ npm test        # host 半边 smoke 自检
 - 浮窗每 2.5s 轮询一次 `/dsh-todo-board/api`，不是推送。
 - 待办板是全局单文件，不按目录分文件。
 - 「自动新会话」需要待办上的目录路径可创建。
-- Cordis 入口的折起是按按钮文字 `Cordis Plugin`（各语言字典里都是这个串）匹配的，不依赖 hash 类名。
 
 ## License
 
