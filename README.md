@@ -8,6 +8,8 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22.19.0-43853d)](package.json)
 
+![TODO board panel](https://raw.githubusercontent.com/sueqet/dsh-todo-board/main/assets/screenshot-2.png)
+
 ---
 
 ## 它解决什么 / Why

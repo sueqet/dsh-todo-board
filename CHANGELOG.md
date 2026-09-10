@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- 市场素材：`assets/screenshot-1.png`（整体界面）与 `assets/screenshot-2.png`（面板特写）由 `tools/capture-screenshots.mjs` 从真实运行中的 UI 渲染生成，配 `screenshots.json` 声明；README 顶部展示面板截图。
+
 ## 0.4.0
 
 - **待办可以带图片**：图片存进 DSH 的附件库（走和聊天上传同一条 `attachments.saveImage` 通路，限制、媒体类型、归一化都用 harness 自己的），派发时作为**真正的 image 块**和提示词一起发给模型——不再是"文件名写在文字里"。
