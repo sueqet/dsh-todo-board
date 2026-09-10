@@ -168,6 +168,11 @@ const CSS = `
   color:var(--tb-dim);word-break:break-all}
 .dshtb-t input{width:100%;padding:2px 5px;border-radius:5px;border:1px solid var(--tb-accent);
   background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);font:inherit;outline:none}
+.dshtb-edit{display:block;width:100%;min-height:76px;max-height:220px;resize:vertical;
+  padding:6px 8px;border-radius:7px;border:1px solid var(--tb-accent);
+  background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);font:inherit;font-size:13px;
+  line-height:1.45;outline:none;box-shadow:0 0 0 3px rgba(128,128,128,.16)}
+.dshtb-edit::placeholder{color:var(--tb-dim)}
 .dshtb-meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;
   font:400 12px/1.5 ${MONO};color:var(--tb-dim)}
 .dshtb-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:6px;
@@ -177,7 +182,6 @@ button.dshtb-chip{cursor:pointer;font:inherit;color:inherit;transition:border-co
 button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-chip.sent{color:var(--tb-ok);border-color:var(--tb-ok)}
 .dshtb-chip.due{color:var(--tb-warn);border-color:var(--tb-warn);font-weight:600}
-.dshtb-chip.bound{color:var(--tb-accent);border-color:var(--tb-accent)}
 .dshtb-acts{display:flex;gap:1px;flex:0 0 auto;opacity:0;transition:opacity .12s}
 .dshtb-item:hover .dshtb-acts{opacity:1}
 .dshtb-ic{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;
@@ -448,6 +452,7 @@ function TodoBoard(props) {
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
   const inputRef = React.useRef(null)
+  const editRef = React.useRef(null)
   /** id -> remindedAt already surfaced, so a reminder notifies exactly once. */
   const seenReminders = React.useRef({})
 
@@ -512,6 +517,15 @@ function TodoBoard(props) {
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 180) + 'px'
   }, [draft])
+
+  // The rename field grows with the text the same way, so a long todo stays
+  // readable while it is being edited.
+  React.useEffect(() => {
+    const el = editRef.current
+    if (el === null) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 220) + 'px'
+  }, [editText, editId])
 
   function refresh() {
     transport.snapshot().then(
@@ -761,40 +775,36 @@ function TodoBoard(props) {
     if (todo.sourceSessionTitle) {
       meta.push(h('span', { className: 'dshtb-chip', key: 't' }, todo.sourceSessionTitle))
     }
-    // A `newSession` row owns the session it opened. Showing the binding makes
-    // it obvious that pressing ▶ again reuses that session instead of opening
-    // yet another one; ✕ drops the binding so the next run opens a fresh one.
-    if (todo.mode === 'newSession' && todo.runSessionId) {
-      meta.push(
-        h(
-          'button',
-          {
-            className: 'dshtb-chip bound',
-            key: 'b',
-            title:
-              '已绑定会话：' + todo.runSessionId +
-              '\n▶ 会把待办发到这个会话，不会新开；点 ✕ 解绑，下次重新开一个新会话',
-            onClick: () => patch(todo.id, { runSessionId: '' }),
-          },
-          '会话 ' + todo.runSessionId.slice(-6) + ' ✕',
-        ),
-      )
-    }
+    // The bound run session is deliberately NOT shown on the row: it is an
+    // internal detail, and the panel stays readable without it. The binding is
+    // still what ▶ reuses; `todo_board list` and the host API expose it when
+    // it actually matters.
 
-    const titleNode =
+    // Renaming happens inline and to the full width of the row: a long todo
+    // needs to be readable while you edit it, not squeezed into one line.
+    const editNode =
       editId === todo.id
-        ? h('input', {
+        ? h('textarea', {
             className: 'dshtb-edit',
+            ref: editRef,
             autoFocus: true,
+            rows: 2,
             value: editText,
             onChange: (e) => setEditText(e.target.value),
             onBlur: commitEdit,
             onKeyDown: (e) => {
-              if (e.key === 'Enter') commitEdit()
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                commitEdit()
+              }
               if (e.key === 'Escape') setEditId('')
             },
           })
-        : h('div', { className: 'dshtb-t', title: '双击编辑', onDoubleClick: () => beginEdit(todo) }, todo.title)
+        : null
+
+    const titleNode = editNode === null
+      ? h('div', { className: 'dshtb-t', title: '双击编辑', onDoubleClick: () => beginEdit(todo) }, todo.title)
+      : editNode
 
     // A plain monospace readout under the title: the two facts the chips can
     // bury in a narrow panel are always visible here — the working directory
