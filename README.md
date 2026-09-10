@@ -63,6 +63,22 @@ A `自动新会话` task opens its session once and **binds** it to the row: lat
 
 新会话会被登记进待办目录所属的**工作区**，侧栏里和手动开的会话一样归组（不是「未分组」）。
 
+## 图片附件 / Attached images
+
+待办可以带图片（最多 4 张，PNG / JPG / WebP / GIF）。图片存进 DSH 的**附件库**，派发时作为**真正的图片**和提示词一起发给模型——不是把文件名写进文字里。
+
+A task may carry images (up to 4; PNG / JPG / WebP / GIF). They are stored in DSH's **attachment store** and dispatched as **real images** alongside the prompt — not as filenames written into text.
+
+- 新增框里点「📎 图片」选图，带缩略图预览，可逐张移除；行上显示缩略图，点击放大，✕ 移除单张。
+- 上限、媒体类型与归一化都用 harness 自己那套（同一条 `attachments.saveImage` 通路），不是本插件自己定的规则。
+- 图片字节由本插件自己的 `GET /dsh-todo-board/image?id=…` 提供：harness 自带的图片读取是**会话作用域**的（只认会话日志里引用过的附件），而待办的附件存在板上，所以板自己当权威——没被任何待办引用的 id 一律 404。
+- **目标模型必须支持图片**：派发前会查模型是否声明了 `image`。文本模型（如 `deepseek-v4-flash`）会直接提示「目标会话的模型不接受图片输入」，而不是让适配器抛 `UNSUPPORTED_CONTENT`。这是 DSH 的模型声明问题，不是插件的限制。
+
+- Pick images with the composer's 📎 button; the row shows thumbnails, click to enlarge, ✕ to drop one.
+- Limits, media types and normalization come from the harness' own attachment admission.
+- Bytes are served by this plugin's `GET /dsh-todo-board/image?id=…`, because the shipped image route is **session-scoped** and would refuse an attachment no session log references. The board is the authority instead: an unreferenced id is a 404.
+- **The target model must accept images.** Dispatch checks the model's declared modalities first and reports a clear message for a text-only model. That is a DSH model-declaration matter, not a plugin limit.
+
 ## 定时执行 / Scheduled execution
 
 每条待办都可以带一个**本地时间**（`YYYY-MM-DDTHH:mm`，分钟精度）。到点之前这条待办不会被派发；到点之后 DSH 按它自己的模式执行它 —— 就像你此刻按了 ▶ 一样。

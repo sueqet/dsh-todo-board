@@ -20,6 +20,15 @@ const h = React.createElement
 
 const ROUTE = '/dsh-todo-board/api'
 const MODES = ['remind', 'resume', 'newSession']
+/** Must not exceed the host's MAX_IMAGES_PER_TODO. */
+const MAX_IMAGES = 4
+const MEDIA_TYPE_BY_EXTENSION = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+}
 const MODE_LABEL = { remind: '提醒', resume: '自动续跑', newSession: '自动新会话' }
 const MODE_SHORT = { remind: '提醒', resume: '续跑', newSession: '新会话' }
 const MODE_HINT = {
@@ -29,7 +38,7 @@ const MODE_HINT = {
 }
 const MONO = 'ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace'
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.3.1'
+const BUILD = '0.4.0'
 
 const CSS = `
 .dshtb-root{position:fixed;top:56px;right:16px;z-index:2147482000;pointer-events:auto;
@@ -96,6 +105,28 @@ const CSS = `
   background:transparent;color:var(--tb-dim);font:inherit;font-size:12px;outline:none;
   transition:border-color .12s,color .12s;color-scheme:dark light}
 .dshtb-when input:focus{border-style:solid;border-color:var(--tb-accent);color:var(--tb-ink)}
+.dshtb-attach{display:flex;flex-direction:column;gap:6px}
+.dshtb-attach label{cursor:pointer;display:inline-flex;align-items:center;gap:4px;align-self:flex-start}
+.dshtb-attach label.off{opacity:.5;cursor:not-allowed}
+.dshtb-thumbs{display:flex;flex-wrap:wrap;gap:6px}
+.dshtb-thumb{position:relative;width:52px;height:52px;padding:0;border:1px solid var(--tb-line);
+  border-radius:8px;background:transparent;cursor:pointer;overflow:hidden}
+.dshtb-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.dshtb-thumb .x{position:absolute;top:0;right:0;padding:0 3px;background:rgba(0,0,0,.6);color:#fff;
+  font:700 10px/1.4 ${MONO};border-bottom-left-radius:6px}
+.dshtb-imgs{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+.dshtb-imgwrap{position:relative;display:inline-flex}
+.dshtb-img{width:64px;height:64px;object-fit:cover;border-radius:7px;border:1px solid var(--tb-line);
+  cursor:zoom-in;display:block}
+.dshtb-imgx{position:absolute;top:-5px;right:-5px;width:16px;height:16px;padding:0;border:0;border-radius:50%;
+  background:var(--dsw-alias-bg-overlay);color:var(--tb-dim);box-shadow:0 0 0 1px var(--tb-line);
+  font:700 9px/1 ${MONO};cursor:pointer;display:grid;place-items:center}
+.dshtb-imgx:hover{color:var(--tb-ink)}
+.dshtb-light{position:fixed;inset:0;z-index:2147483000;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:10px;background:rgba(0,0,0,.72);cursor:zoom-out;
+  animation:dshtb-in .14s ease-out}
+.dshtb-light img{max-width:88vw;max-height:82vh;border-radius:10px;box-shadow:0 20px 60px -18px rgba(0,0,0,.8);cursor:default}
+.dshtb-lightcap{font:600 11px/1.4 ${MONO};color:#fff;opacity:.85}
 .dshtb-dir input::placeholder{color:var(--tb-dim);opacity:.85}
 .dshtb-dir input:focus{border-style:solid;border-color:var(--tb-accent);color:var(--tb-ink)}
 .dshtb-list{overflow:auto;padding:2px 0 6px;scrollbar-width:thin}
@@ -336,6 +367,11 @@ function describe(failure) {
   return String(failure)
 }
 
+/** Durable attachment bytes, served by this plugin's own board-scoped route. */
+function imageUrl(attachmentId) {
+  return ROUTE.replace(/\/api$/, '/image') + '?id=' + encodeURIComponent(String(attachmentId))
+}
+
 // ------------------------------------------------------------- panel layout
 
 const LAYOUT_KEY = 'dsh.todoBoard.layout.v1'
@@ -399,6 +435,8 @@ function TodoBoard(props) {
   const [mode, setMode] = React.useState('remind')
   const [dirInput, setDirInput] = React.useState('')
   const [when, setWhen] = React.useState('')
+  const [pending, setPending] = React.useState([])
+  const [viewing, setViewing] = React.useState(null)
   const [filter, setFilter] = React.useState('dir')
   const [busy, setBusy] = React.useState(false)
   const [dragId, setDragId] = React.useState('')
@@ -552,16 +590,59 @@ function TodoBoard(props) {
     const title = draft.trim()
     if (title === '') return
     const targetDir = dirInput.trim() !== '' ? dirInput.trim() : cwd
+    const images = pending
     setDraft('')
     setWhen('')
+    setPending([])
     call('create', {
       title,
       mode,
       dir: targetDir,
       schedule: when,
+      images,
       sessionId: currentId === undefined ? '' : currentId,
       sessionTitle: currentTitle,
     })
+  }
+
+  /** Read one picked file into the wire shape the host admits. */
+  function readImageFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onerror = () => reject(new Error('读取失败：' + file.name))
+      reader.onload = () => {
+        const result = typeof reader.result === 'string' ? reader.result : ''
+        const comma = result.indexOf(',')
+        if (comma < 0) {
+          reject(new Error('无法编码：' + file.name))
+          return
+        }
+        resolve({
+          data: result.slice(comma + 1),
+          mediaType: file.type,
+          name: file.name,
+        })
+      }
+      reader.readAsDataURL(file)
+    })
+  }
+
+  function pickImages(event) {
+    const files = Array.from((event.target.files || []))
+    event.target.value = ''
+    if (files.length === 0) return
+    setBusy(true)
+    Promise.all(files.map(readImageFile)).then(
+      (encoded) => {
+        setPending((current) => current.concat(encoded).slice(0, MAX_IMAGES))
+        setErr('')
+        setBusy(false)
+      },
+      (failure) => {
+        setErr(describe(failure))
+        setBusy(false)
+      },
+    )
   }
 
   function setSchedule(todo, value) {
@@ -726,6 +807,44 @@ function TodoBoard(props) {
     }
     const detailNode = h('div', { className: 'dshtb-facts' }, facts.join('  ·  '))
 
+    // Attached images: thumbnails on the row, click to enlarge, ✕ to drop.
+    const images = Array.isArray(todo.images) ? todo.images : []
+    const imagesNode =
+      images.length === 0
+        ? null
+        : h(
+            'div',
+            { className: 'dshtb-imgs' },
+            images.map((image, at) =>
+              h(
+                'span',
+                { className: 'dshtb-imgwrap', key: 'i' + at },
+                h('img', {
+                  className: 'dshtb-img',
+                  src: imageUrl(image.attachmentId),
+                  alt: image.name || '附图',
+                  title: (image.name || '附图') + ' · ' + image.width + '×' + image.height + '（点击放大）',
+                  onClick: () => setViewing(image),
+                  onError: (e) => {
+                    e.currentTarget.style.opacity = '0.25'
+                  },
+                }),
+                h(
+                  'button',
+                  {
+                    className: 'dshtb-imgx',
+                    title: '移除这张图片',
+                    onClick: () => patch(todo.id, {
+                      images: images.filter((_, i) => i !== at),
+                      clearImages: images.length === 1,
+                    }),
+                  },
+                  '\u2715',
+                ),
+              ),
+            ),
+          )
+
     return h(
       'div',
       {
@@ -782,7 +901,7 @@ function TodoBoard(props) {
           todo.verified ? '\u2713' : '',
         ),
       ),
-      h('div', { className: 'dshtb-body' }, titleNode, detailNode, h('div', { className: 'dshtb-meta' }, meta)),
+      h('div', { className: 'dshtb-body' }, titleNode, detailNode, imagesNode, h('div', { className: 'dshtb-meta' }, meta)),
       h(
         'div',
         { className: 'dshtb-acts' },
@@ -955,6 +1074,40 @@ function TodoBoard(props) {
         ),
         h(
           'div',
+          { className: 'dshtb-attach' },
+          h('label', { className: 'dshtb-link' + (pending.length >= MAX_IMAGES ? ' off' : ''), title: '给这条待办附图（最多 ' + MAX_IMAGES + ' 张，PNG/JPG/WebP/GIF）' },
+            '\uD83D\uDCCE 图片',
+            h('input', {
+              type: 'file',
+              accept: 'image/png,image/jpeg,image/webp,image/gif',
+              multiple: true,
+              disabled: pending.length >= MAX_IMAGES,
+              style: { display: 'none' },
+              onChange: pickImages,
+            }),
+          ),
+          pending.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'dshtb-thumbs' },
+                pending.map((image, at) =>
+                  h(
+                    'button',
+                    {
+                      key: 'p' + at,
+                      className: 'dshtb-thumb',
+                      title: (image.name || '图片') + '（点击移除）',
+                      onClick: () => setPending((current) => current.filter((_, i) => i !== at)),
+                    },
+                    h('img', { src: 'data:' + image.mediaType + ';base64,' + image.data, alt: image.name || '' }),
+                    h('span', { className: 'x' }, '\u2715'),
+                  ),
+                ),
+              ),
+        ),
+        h(
+          'div',
           { className: 'dshtb-modes' },
           MODES.map((id) =>
             h(
@@ -1052,6 +1205,18 @@ function TodoBoard(props) {
         onPointerCancel: endPointer,
         onDoubleClick: resetLayout,
       }),
+      viewing === null
+        ? null
+        : h(
+            'div',
+            { className: 'dshtb-light', onClick: () => setViewing(null) },
+            h('img', {
+              src: imageUrl(viewing.attachmentId),
+              alt: viewing.name || '附图',
+              onClick: (e) => e.stopPropagation(),
+            }),
+            h('div', { className: 'dshtb-lightcap' }, viewing.name || '附图', ' · ', viewing.width + '×' + viewing.height, ' · 点空白处关闭'),
+          ),
     ),
   )
 }

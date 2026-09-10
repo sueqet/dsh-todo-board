@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- **待办可以带图片**：图片存进 DSH 的附件库（走和聊天上传同一条 `attachments.saveImage` 通路，限制、媒体类型、归一化都用 harness 自己的），派发时作为**真正的 image 块**和提示词一起发给模型——不再是"文件名写在文字里"。
+  - 面板：新增框有「📎 图片」按钮（最多 4 张，PNG/JPG/WebP/GIF），带缩略图预览、逐张移除；行上显示缩略图，点击放大，✕ 单张移除。
+  - 图片字节由插件自己的 `GET /dsh-todo-board/image?id=…` 提供：harness 自带的图片读取是**会话作用域**的，只认会话日志里引用过的附件，而待办的附件存在板上——所以板自己当权威，未被任何待办引用的 id 一律 404。
+  - `todo_board`：`add` 支持 `images`（主机上图片文件的绝对路径，host 侧读盘并入库），`list` 标注图片张数，输出 schema 增加 `imageCount`。
+  - 派发前会检查目标模型是否声明了 image：文本模型（比如 `deepseek-v4-flash`）会直接给出「目标会话的模型不接受图片输入」，而不是等适配器抛 `UNSUPPORTED_CONTENT`。
+  - 附件不阻塞会话：`attachments` 服务缺失、格式不支持、超过 4 张都会得到明确错误，会话照常创建。
+- 修复：`sendTo` 改成同步写 `dispatchedAt` + `nextDue` 跳过在途派发——图片能力探测引入了 await，否则定时器会在派发完成前把同一条待办再挑一次，导致 `fireDue` ⇄ `armTimer` 无限递归。
+
 ## 0.3.1
 
 - **新会话归入工作区**：`自动新会话` 创建的会话现在会被登记到所属工作区（`workspaceRegistry.resolveByPath(dirPath)` + `attachSession`），侧栏不再把它列为「未分组」。分组是工作区记录上的 `sessionIds`，不是会话头字段——DSH 自己开会话时会 attach，而 `agents.create` 不会。
