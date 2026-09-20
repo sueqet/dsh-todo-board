@@ -38,7 +38,7 @@ const MODE_HINT = {
 }
 const MONO = 'ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace'
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.4.0'
+const BUILD = '0.5.0'
 
 const CSS = `
 .dshtb-root{position:fixed;top:56px;right:16px;z-index:2147482000;pointer-events:auto;
@@ -69,9 +69,19 @@ const CSS = `
 .dshtb-stats i{font-style:normal;display:inline-flex;align-items:center;gap:4px}
 .dshtb-stats i::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.75}
 .dshtb-sp{flex:1}
-.dshtb-fold{width:20px;height:20px;border:0;border-radius:6px;background:transparent;color:var(--tb-dim);
-  cursor:pointer;font:600 13px/1 ${MONO};padding:0;transition:background .12s,color .12s}
-.dshtb-fold:hover{background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink)}
+.dshtb-fold{width:26px;height:26px;border:1px solid transparent;border-radius:7px;background:transparent;
+  color:var(--tb-dim);cursor:pointer;font:600 14px/1 ${MONO};padding:0;display:grid;place-items:center;
+  transition:background .12s,color .12s,border-color .12s}
+.dshtb-fold:hover{background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);border-color:var(--tb-line2)}
+.dshtb-fold:focus-visible{outline:2px solid var(--tb-accent);outline-offset:1px}
+/* Section label doubling as the fold/unfold control for what follows it. */
+.dshtb-sect{display:flex;align-items:center;gap:6px;width:100%;padding:9px 12px 5px;
+  border:0;background:transparent;cursor:pointer;user-select:none;text-align:left;
+  font:600 10.5px/1 ${MONO};letter-spacing:.09em;text-transform:uppercase;color:var(--tb-dim);
+  transition:color .12s}
+.dshtb-sect:hover{color:var(--tb-ink)}
+.dshtb-sect::after{content:'';flex:1;height:1px;background:var(--tb-line)}
+.dshtb-sect .car{font:700 11px/1 ${MONO};color:var(--tb-accent)}
 .dshtb-seg{display:flex;gap:2px;margin:9px 12px 0;padding:2px;border-radius:10px;
   background:var(--dsw-alias-bg-layer-1);border:1px solid var(--tb-line)}
 .dshtb-seg button{flex:1;display:flex;align-items:center;justify-content:center;gap:5px;padding:5px 6px;
@@ -207,11 +217,17 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
   max-height:var(--dsh-todo-cordis-maxh,60vh) !important}
 .dshtb-err{padding:6px 12px;color:var(--dsw-alias-state-error-primary);font:400 10.5px/1.4 ${MONO};
   word-break:break-all;border-top:1px solid var(--tb-line)}
-.dshtb-pill{display:inline-flex;align-items:center;gap:7px;padding:7px 12px 7px 10px;border-radius:999px;
+/* Parked as one line: label + counts + the next task, expandable by a click.
+   align-self keeps it hugging its content instead of stretching to the card width. */
+.dshtb-pill{align-self:flex-start;display:flex;align-items:center;gap:8px;min-width:0;
+  max-width:calc(100vw - 32px);padding:6px 10px;border-radius:10px;
   background:var(--tb-bg);border:1px solid var(--tb-line);cursor:pointer;user-select:none;
-  box-shadow:0 8px 26px -10px rgba(0,0,0,.5);transition:transform .14s,border-color .14s}
-.dshtb-pill:hover{transform:translateY(-1px);border-color:var(--tb-line2)}
-.dshtb-pill .lbl{font:600 10px/1 ${MONO};letter-spacing:.12em;text-transform:uppercase}
+  box-shadow:0 10px 30px -12px rgba(0,0,0,.5);transition:border-color .14s}
+.dshtb-pill:hover{border-color:var(--tb-line2)}
+.dshtb-pill .lbl{font:600 10px/1 ${MONO};letter-spacing:.12em;text-transform:uppercase;color:var(--tb-ink)}
+.dshtb-pill .next{flex:1;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:12px;color:var(--tb-dim)}
+.dshtb-pill .next.q{font-style:italic;opacity:.7}
 .dshtb-badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--tb-accent);
   color:#fff;font:700 10px/1 ${MONO};font-variant-numeric:tabular-nums;display:inline-grid;place-items:center}
 .dshtb-badge.warn{background:var(--tb-warn)}
@@ -408,6 +424,35 @@ function saveLayout(layout) {
   }
 }
 
+/**
+ * Folded sections and the parked panel survive a reload: folding away the
+ * composer is something you do once, not once per page load.
+ */
+const SECTIONS_KEY = 'dsh.todoBoard.sections.v1'
+const SECTION_IDS = ['compose', 'list', 'panel']
+
+function loadSections() {
+  const state = { compose: true, list: true, panel: true }
+  try {
+    const raw = window.localStorage.getItem(SECTIONS_KEY)
+    if (raw === null) return state
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object') return state
+    for (const id of SECTION_IDS) if (typeof parsed[id] === 'boolean') state[id] = parsed[id]
+  } catch (err) {
+    /* keep the defaults */
+  }
+  return state
+}
+
+function saveSections(state) {
+  try {
+    window.localStorage.setItem(SECTIONS_KEY, JSON.stringify(state))
+  } catch (err) {
+    /* storage unavailable */
+  }
+}
+
 function clampLayout(layout) {
   const maxW = Math.max(MIN_W, window.innerWidth - 16)
   const maxH = Math.max(MIN_H, window.innerHeight - 16)
@@ -416,6 +461,37 @@ function clampLayout(layout) {
   const x = Math.min(Math.max(layout.x, 8), Math.max(8, window.innerWidth - w - 8))
   const y = Math.min(Math.max(layout.y, 8), Math.max(8, window.innerHeight - h - 8))
   return { x, y, w, h }
+}
+
+/**
+ * A foldable section of the panel: its label doubles as the control that shows
+ * and hides the body, so a folded panel still says what it is hiding.
+ *
+ * @param options.id - stable key, also handed back to `onToggle`.
+ * @param options.name - section name, used in the tooltip.
+ * @param options.note - optional count rendered after the name.
+ * @param options.open - whether the body is currently visible.
+ * @param options.onToggle - called with `id` when the header is clicked.
+ * @param options.body - the single keyed element to hide when folded.
+ * @returns header and body as siblings, ready to spread into a children list.
+ */
+function foldable(options) {
+  const { id, name, note, open, onToggle, body } = options
+  return [
+    h(
+      'button',
+      {
+        key: id,
+        className: 'dshtb-sect',
+        'aria-expanded': open ? 'true' : 'false',
+        title: (open ? '折叠' : '展开') + '「' + name + '」',
+        onClick: () => onToggle(id),
+      },
+      h('span', { className: 'car' }, open ? '\u25BE' : '\u25B8'),
+      note === undefined ? name : name + ' ' + note,
+    ),
+    open ? body : null,
+  ]
 }
 
 // --------------------------------------------------------------- component
@@ -449,6 +525,7 @@ function TodoBoard(props) {
   const [editText, setEditText] = React.useState('')
   const [layout, setLayout] = React.useState(loadLayout)
   const [cordisFound, setCordisFound] = React.useState(true)
+  const [sections, setSections] = React.useState(loadSections)
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
   const inputRef = React.useRef(null)
@@ -478,6 +555,13 @@ function TodoBoard(props) {
   }
 
   function beginDrag(event) {
+    // A pointerdown on a control inside the title bar must not start a drag:
+    // setPointerCapture retargets the following click to the captured element,
+    // so the button underneath would never see it.
+    const target = event.target
+    if (target !== null && typeof target.closest === 'function' && target.closest('button') !== null) {
+      return
+    }
     seedFrom(event, 'move')
   }
 
@@ -508,6 +592,20 @@ function TodoBoard(props) {
     layoutRef.current = null
     setLayout(null)
     saveLayout(null)
+  }
+
+  /** Fold one section of the panel away, or bring it back. */
+  function toggleSection(id) {
+    setSections((current) => {
+      const next = { ...current, [id]: !current[id] }
+      saveSections(next)
+      return next
+    })
+  }
+
+  /** Park the whole panel as a single line, or unfold it again. */
+  function togglePanel() {
+    setOpen((current) => !current)
   }
 
   // Grow the composer with its content, up to the CSS max-height.
@@ -941,6 +1039,7 @@ function TodoBoard(props) {
   }
 
   if (!open) {
+    const next = visible.filter((t) => !t.verified && !t.aiDone)[0]
     return h(
       'div',
       {
@@ -962,10 +1061,19 @@ function TodoBoard(props) {
         'div',
         {
           className: 'dshtb-pill',
+          role: 'button',
+          tabIndex: 0,
           title:
             'TODO 板 · 点击展开' +
+            (next === undefined ? '（没有未完成待办）' : '：' + next.title) +
             (data !== null && data !== undefined && data.storagePath ? '\n存储：' + data.storagePath : ''),
           onClick: () => setOpen(true),
+          onKeyDown: (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              setOpen(true)
+            }
+          },
         },
         h('span', { className: 'lbl' }, 'TODO'),
         h(
@@ -973,6 +1081,10 @@ function TodoBoard(props) {
           { className: 'dshtb-badge' + (awaitingVerify > 0 ? ' warn' : '') },
           String(openCount),
         ),
+        next === undefined
+          ? h('span', { className: 'next q' }, filter === 'dir' ? '当前目录已清空' : '没有未完成待办')
+          : h('span', { className: 'next' }, '下一条 · ' + next.title),
+        awaitingVerify > 0 ? h('span', { className: 'dshtb-badge warn' }, '待验 ' + awaitingVerify) : null,
       ),
     )
   }
@@ -1054,158 +1166,187 @@ function TodoBoard(props) {
           h('i', { title: '未验收' }, String(openCount)),
           awaitingVerify > 0 ? h('i', { title: 'AI 已完成，等你验收' }, '待验 ' + awaitingVerify) : null,
         ),
-        h('button', { className: 'dshtb-fold', title: '收起', onClick: () => setOpen(false) }, '\u2013'),
+        h(
+          'button',
+          {
+            className: 'dshtb-fold',
+            title: '收起为一行（只留计数与下一条待办）',
+            'aria-label': '收起为一行',
+            onClick: togglePanel,
+          },
+          '\u2013',
+        ),
       ),
       h('div', { className: 'dshtb-seg' }, segments),
-      h(
-        'div',
-        { className: 'dshtb-compose' },
-        h(
+      ...foldable({
+        id: 'compose',
+        name: '新增待办',
+        open: sections.compose,
+        onToggle: toggleSection,
+        body: h(
           'div',
-          { className: 'dshtb-add' },
-          h('textarea', {
-            ref: inputRef,
-            rows: 3,
-            placeholder: '新增待办…（Enter 添加，Shift+Enter 换行）',
-            value: draft,
-            onChange: (e) => setDraft(e.target.value),
-            onKeyDown: (e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                add()
-              }
-            },
-          }),
+          { className: 'dshtb-compose', key: 'compose-body' },
           h(
-            'button',
-            { className: 'dshtb-ic', title: '添加', disabled: busy || draft.trim() === '', onClick: add },
-            '\uFF0B',
-          ),
-        ),
-        h(
-          'div',
-          { className: 'dshtb-attach' },
-          h('label', { className: 'dshtb-link' + (pending.length >= MAX_IMAGES ? ' off' : ''), title: '给这条待办附图（最多 ' + MAX_IMAGES + ' 张，PNG/JPG/WebP/GIF）' },
-            '\uD83D\uDCCE 图片',
-            h('input', {
-              type: 'file',
-              accept: 'image/png,image/jpeg,image/webp,image/gif',
-              multiple: true,
-              disabled: pending.length >= MAX_IMAGES,
-              style: { display: 'none' },
-              onChange: pickImages,
+            'div',
+            { className: 'dshtb-add' },
+            h('textarea', {
+              ref: inputRef,
+              rows: 3,
+              placeholder: '新增待办…（Enter 添加，Shift+Enter 换行）',
+              value: draft,
+              onChange: (e) => setDraft(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  add()
+                }
+              },
             }),
-          ),
-          pending.length === 0
-            ? null
-            : h(
-                'div',
-                { className: 'dshtb-thumbs' },
-                pending.map((image, at) =>
-                  h(
-                    'button',
-                    {
-                      key: 'p' + at,
-                      className: 'dshtb-thumb',
-                      title: (image.name || '图片') + '（点击移除）',
-                      onClick: () => setPending((current) => current.filter((_, i) => i !== at)),
-                    },
-                    h('img', { src: 'data:' + image.mediaType + ';base64,' + image.data, alt: image.name || '' }),
-                    h('span', { className: 'x' }, '\u2715'),
-                  ),
-                ),
-              ),
-        ),
-        h(
-          'div',
-          { className: 'dshtb-modes' },
-          MODES.map((id) =>
             h(
               'button',
-              { key: id, className: mode === id ? 'on' : '', title: MODE_LABEL[id], onClick: () => setMode(id) },
-              MODE_SHORT[id],
+              { className: 'dshtb-ic', title: '添加', disabled: busy || draft.trim() === '', onClick: add },
+              '\uFF0B',
             ),
           ),
-        ),
-        h('div', { className: 'dshtb-hint' }, MODE_HINT[mode]),
-        h(
-          'div',
-          { className: 'dshtb-when' },
-          h('span', { className: 'lbl' }, '定时'),
-          h('input', {
-            type: 'datetime-local',
-            value: when,
-            title: '到点后才执行（留空 = 立即可以执行）',
-            onChange: (e) => setWhen(e.target.value),
-          }),
-          when !== ''
-            ? h(
-                'button',
-                {
-                  className: 'dshtb-ic',
-                  title: '取消定时',
-                  onClick: () => setWhen(''),
-                },
-                '\u2715',
-              )
-            : h('span', { className: 'dshtb-hint' }, '不填'),
-        ),
-        h(
-          'div',
-          { className: 'dshtb-dir' },
-          h('input', {
-            placeholder: cwd === '' ? '目录（绝对路径）' : '目录：' + cwd,
-            value: dirInput,
-            onChange: (e) => setDirInput(e.target.value),
-          }),
-        ),
-      ),
-      rows.length === 0
-        ? h(
+          h(
             'div',
-            { className: 'dshtb-empty' },
-            h('b', null, '\u2610'),
-            h(
-              'span',
-              null,
-              filter === 'dir' ? '当前目录还没有待办' : '这里还没有待办',
+            { className: 'dshtb-attach' },
+            h('label', { className: 'dshtb-link' + (pending.length >= MAX_IMAGES ? ' off' : ''), title: '给这条待办附图（最多 ' + MAX_IMAGES + ' 张，PNG/JPG/WebP/GIF）' },
+              '\uD83D\uDCCE 图片',
+              h('input', {
+                type: 'file',
+                accept: 'image/png,image/jpeg,image/webp,image/gif',
+                multiple: true,
+                disabled: pending.length >= MAX_IMAGES,
+                style: { display: 'none' },
+                onChange: pickImages,
+              }),
             ),
-          )
-        : h('div', { className: 'dshtb-list' }, rows),
+            pending.length === 0
+              ? null
+              : h(
+                  'div',
+                  { className: 'dshtb-thumbs' },
+                  pending.map((image, at) =>
+                    h(
+                      'button',
+                      {
+                        key: 'p' + at,
+                        className: 'dshtb-thumb',
+                        title: (image.name || '图片') + '（点击移除）',
+                        onClick: () => setPending((current) => current.filter((_, i) => i !== at)),
+                      },
+                      h('img', { src: 'data:' + image.mediaType + ';base64,' + image.data, alt: image.name || '' }),
+                      h('span', { className: 'x' }, '\u2715'),
+                    ),
+                  ),
+                ),
+          ),
+          h(
+            'div',
+            { className: 'dshtb-modes' },
+            MODES.map((id) =>
+              h(
+                'button',
+                { key: id, className: mode === id ? 'on' : '', title: MODE_LABEL[id], onClick: () => setMode(id) },
+                MODE_SHORT[id],
+              ),
+            ),
+          ),
+          h('div', { className: 'dshtb-hint' }, MODE_HINT[mode]),
+          h(
+            'div',
+            { className: 'dshtb-when' },
+            h('span', { className: 'lbl' }, '定时'),
+            h('input', {
+              type: 'datetime-local',
+              value: when,
+              title: '到点后才执行（留空 = 立即可以执行）',
+              onChange: (e) => setWhen(e.target.value),
+            }),
+            when !== ''
+              ? h(
+                  'button',
+                  {
+                    className: 'dshtb-ic',
+                    title: '取消定时',
+                    onClick: () => setWhen(''),
+                  },
+                  '\u2715',
+                )
+              : h('span', { className: 'dshtb-hint' }, '不填'),
+          ),
+          h(
+            'div',
+            { className: 'dshtb-dir' },
+            h('input', {
+              placeholder: cwd === '' ? '目录（绝对路径）' : '目录：' + cwd,
+              value: dirInput,
+              onChange: (e) => setDirInput(e.target.value),
+            }),
+          ),
+        ),
+      }),
+      ...foldable({
+        id: 'list',
+        name: '待办列表',
+        note: visible.length,
+        open: sections.list,
+        onToggle: toggleSection,
+        body:
+          rows.length === 0
+            ? h(
+                'div',
+                { className: 'dshtb-empty', key: 'list-body' },
+                h('b', null, '\u2610'),
+                h(
+                  'span',
+                  null,
+                  filter === 'dir' ? '当前目录还没有待办' : '这里还没有待办',
+                ),
+              )
+            : h('div', { className: 'dshtb-list', key: 'list-body' }, rows),
+      }),
       err !== '' ? h('div', { className: 'dshtb-err' }, err) : null,
       data !== null && data !== undefined && data.storageError
         ? h('div', { className: 'dshtb-err' }, data.storageError)
         : null,
-      h(
-        'div',
-        { className: 'dshtb-foot' },
-        h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
-        h('span', null, '未验收 ' + openCount),
-        awaitingVerify > 0 ? h('span', null, '· 待验 ' + awaitingVerify) : null,
-        h('span', { className: 'dshtb-sp' }),
-        verifiedCount > 0
-          ? h(
-              'button',
-              {
-                className: 'dshtb-link',
-                title: '删除所有已验收的条目（共 ' + verifiedCount + ' 条）',
-                onClick: () => call('clearVerified'),
-              },
-              '清理已验收 ' + verifiedCount,
-            )
-          : null,
-        h(
-          'button',
-          {
-            className: 'dshtb-link' + (cordisFound ? '' : ' off'),
-            title: cordisFound
-              ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
-              : '找不到 Cordis 入口，暂时打不开',
-            onClick: openCordisPanel,
-          },
-          'Cordis Plugin',
-        ),
-      ),
+      ...foldable({
+        id: 'panel',
+        name: '面板',
+        open: sections.panel,
+        onToggle: toggleSection,
+        body: h(
+          'div',
+          { className: 'dshtb-foot', key: 'panel-body' },
+          h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
+          h('span', null, '未验收 ' + openCount),
+          awaitingVerify > 0 ? h('span', null, '· 待验 ' + awaitingVerify) : null,
+          h('span', { className: 'dshtb-sp' }),
+          verifiedCount > 0
+            ? h(
+                'button',
+                {
+                  className: 'dshtb-link',
+                  title: '删除所有已验收的条目（共 ' + verifiedCount + ' 条）',
+                  onClick: () => call('clearVerified'),
+                },
+                '清理已验收 ' + verifiedCount,
+              )
+            : null,
+          h(
+            'button',
+            {
+              className: 'dshtb-link' + (cordisFound ? '' : ' off'),
+              title: cordisFound
+                ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
+                : '找不到 Cordis 入口，暂时打不开',
+              onClick: openCordisPanel,
+            },
+            'Cordis Plugin',
+          ),
+          ),
+      }),
       h('div', {
         className: 'dshtb-resize',
         title: '拖动缩放 · 双击还原',

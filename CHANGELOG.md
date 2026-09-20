@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- **面板可以折叠**，不用的时候只占一行：
+  - 标题栏的 `–` 把整板收成**一行**（不再是浮动胶囊）：`TODO · 未完成数 · 下一条待办` + 待验收计数；点这一行任意位置展开，键盘 `Enter` / 空格也行。这一行按内容收窄，不撑满面板宽度。
+  - 面板内部三个区块各自可折叠：**新增待办**（输入框 / 图片 / 模式 / 定时 / 目录）、**待办列表**（标题带条数）、**面板**（页脚计数器 / 清理已验收 / Cordis 入口）。区块标题本身就是开关，箭头 `▾ / ▸` 表示状态。
+  - 折叠状态存进 `localStorage`（`dsh.todoBoard.sections.v1`），刷新后保持。
+- 修复：标题栏里的按钮点不动。拖动用的 `setPointerCapture` 会把随后的 click 重定向到指针捕获元素，按钮永远收不到点击；现在标题栏上的 `pointerdown` 落在按钮上时不启动拖动。（收成一行后如果没有这个修复，会卡在收不起也展不开的状态。）
+- `tools/client-smoke.mjs`：浏览器半边的自检（自带极简 React hook 运行时 + DOM stub，无需浏览器），覆盖区块折叠、一行视图的内容、以及标题栏按钮不被拖动吞掉。`npm test` 现在跑 host + client 两个 smoke。
+
 ## 0.4.1
 
 - 市场素材：`assets/screenshot-1.png`（整体界面）与 `assets/screenshot-2.png`（面板特写）由 `tools/capture-screenshots.mjs` 从真实运行中的 UI 渲染生成，配 `screenshots.json` 声明；README 顶部展示面板截图。

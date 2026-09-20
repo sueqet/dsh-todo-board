@@ -112,11 +112,16 @@ Only the right-hand box closes a task. The prompt section explicitly forbids the
 
 ## 面板操作 / Panel
 
+- **折叠为一行**：标题栏右侧的 `–` 把整板收成一行 —— `TODO · 未完成数 · 下一条待办 · 待验 N`，点这一行任意位置展开。平时挂着不占地方，扫一眼就知道还剩什么。
+- **区块折叠**：面板内部三个区块（新增待办 / 待办列表 / 面板）各自可折叠，点区块标题切换，`▾` 展开、`▸` 已折叠。只留列表时最省空间；折叠状态记在 `localStorage`，刷新后保持。
 - **拖动 / 缩放**：拖标题栏移动，右下角 `◢` 缩放；位置与尺寸存进 `localStorage`，刷新保留；双击标题栏或拖柄还原。
 - **筛选**：当前目录 / 当前会话 / 全部，每段带未完成计数。
 - **行内编辑**：双击标题改名；点模式标签在 提醒 → 续跑 → 新会话 之间循环切换。
 - **多行输入**：新增框自动增高（3 行起步，最高 180px），`Enter` 添加、`Shift+Enter` 换行。
 - **Cordis 入口**：侧边栏底部的 `Cordis Plugin` 按钮折起，入口移到本面板底部；点它打开原面板，面板出现在**本面板正下方**（右对齐、互不覆盖），拖动或缩放本面板时它会跟着走。找不到入口时按钮会变灰并给出提示。
+
+- **Park as one line**: the `–` in the title bar collapses the whole board to a single line — `TODO · open count · next task · 待验 N`. Click anywhere on that line (or press `Enter`/`Space`) to unfold; the line hugs its content instead of spanning the panel. It stays out of the way until you need it.
+- **Section folding**: the composer, the list, and the footer each fold away from their own header (`▾` open, `▸` folded); with only the list left the panel is at its smallest. The folded set is kept in `localStorage` across reloads.
 
 ## 模型工具 / The `todo_board` tool
 
@@ -151,6 +156,7 @@ cordis.patch.yml      向 profile 树 insert 一行 todo-board
 lib/index.js          Host：板文件、todo_board 工具、回合结束钩子、提示词段落、/dsh-todo-board/api
 client/client.js      Browser：shell.overlay 浮窗，走 fetch 访问上面的路由
 tools/smoke.mjs       Host 半边自检（stub ctx + 临时 DSH_HOME）
+tools/client-smoke.mjs  Browser 半边自检（极简 React hook 运行时 + DOM stub，折叠行为）
 ```
 
 Host 半刻意不 import 任何 `@deepseek-ai/*`：profile 安装的插件从自身目录解析模块，harness 包在那里不可达，一切通过 `ctx`。
@@ -159,7 +165,7 @@ Host 半刻意不 import 任何 `@deepseek-ai/*`：profile 安装的插件从自
 
 ```sh
 npm run check   # node --check 两个入口
-npm test        # host 半边 smoke 自检
+npm test        # host + client 两半 smoke 自检
 ```
 
 改完客户端只需刷新页面；改 Host 半边需要重启 Profile。
