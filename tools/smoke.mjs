@@ -256,9 +256,10 @@ assert.equal(added.todos[0].schedule, '', 'a plain add carries no schedule')
 assert.equal(added.todos[0].aiDone, false)
 assert.deepEqual(
   Object.keys(added.todos[0]).sort(),
-  ['aiDone', 'dirLabel', 'id', 'imageCount', 'mode', 'schedule', 'title', 'verified'],
+  ['aiDone', 'dirLabel', 'id', 'imageCount', 'mode', 'schedule', 'state', 'title', 'verified'],
   'tool rows carry exactly the declared schema keys',
 )
+assert.equal(added.todos[0].state, 'pending', 'a brand-new row has never been dispatched')
 const firstId = added.todos[0].id
 
 await registered.tool.execute({ action: 'add', title: '第一条', mode: 'resume' }, exec)
@@ -556,6 +557,150 @@ assert.equal(
   'tool rows report imageCount',
 )
 console.log('images  OK')
+
+// ------------------------------------------------------------ row lifecycle
+//
+// The state a row reports is derived from the live session list, and a row whose
+// target session is gone must stay *pending* rather than being stamped as
+// dispatched — otherwise the scheduler and the turn-end hook both skip it and it
+// silently never runs again.
+
+const orphan = await postJson({
+  action: 'create',
+  title: '目标会话已经没了',
+  mode: 'resume',
+  dir: DIR,
+  sessionId: 'session-that-is-gone',
+})
+assert.equal(orphan.ok, true)
+assert.equal(orphan.todo.state, 'pending', 'a fresh row starts out undispatched')
+const orphanId = orphan.todo.id
+
+const orphanRun = await postJson({ action: 'run', id: orphanId, sessionId: '' })
+assert.equal(orphanRun.ok, false, 'dispatching to a dead session fails')
+assert.equal(orphanRun.lost, true, 'and says the row is stranded')
+
+/** The panel's own view of one row, straight from the GET route. */
+async function readRow(id) {
+  const response = fakeResponse()
+  await apiRoute.handler({ method: 'GET' }, response)
+  return JSON.parse(response.box.body).todos.find((todo) => todo.id === id)
+}
+
+const afterLoss = await readRow(orphanId)
+assert.equal(afterLoss.state, 'lost', 'the row reports 目标会话丢失')
+assert.equal(afterLoss.targetAlive, false, 'the panel can see the target is gone')
+assert.equal(afterLoss.lostKind, 'no-session', 'and says which kind of failure parked it')
+assert.equal(
+  afterLoss.dispatchedAt,
+  0,
+  'a failed dispatch must NOT stamp dispatchedAt, or the row is retired for good',
+)
+assert.ok(afterLoss.lostAt > 0, 'the failure is recorded instead')
+
+// A fresh lost row waits out its first backoff, so the scheduler does not spin.
+const orphanList = await registered.tool.execute({ action: 'list', all: true }, exec)
+const orphanRow = orphanList.todos.find((todo) => todo.id === orphanId)
+assert.equal(orphanRow.state, 'lost', 'the tool reports the same state')
+assert.ok(orphanList.message.includes('目标会话丢失'), 'and names it in the readout')
+
+// Re-targeting the row clears the verdict: it is queue-eligible again.
+const rescued = await postJson({ action: 'patch', id: orphanId, patch: { mode: 'newSession' } })
+assert.equal(rescued.ok, true)
+assert.equal(rescued.todo.state, 'pending', 'changing the mode clears the lost marker')
+assert.equal(rescued.todo.lostAt, 0)
+assert.equal(rescued.todo.lostKind, '', 'and clears the recorded failure kind')
+
+// An image the target model refuses parks the row too, but with its own kind —
+// the panel must not report a missing session when the session is fine.
+const pngRef = (await readRow(imageId)) !== undefined
+assert.equal(pngRef, true, 'the image row from the earlier section still exists')
+const textOnly = await postJson({
+  action: 'create',
+  title: '模型看不了这张图',
+  mode: 'resume',
+  dir: DIR,
+  sessionId: agent.id,
+  images: [{ data: PNG_BASE64, mediaType: 'image/png' }],
+})
+assert.equal(textOnly.ok, true, 'the row with an image is created')
+
+// A live but idle target reads as 已派发; a running one reads as 进行中. After the
+// rebinding test above, `boundId` is owned by the second spawned session.
+await postJson({ action: 'run', id: orphanId, sessionId: agent.id })
+const dispatchedRow = await readRow(orphanId)
+assert.ok(dispatchedRow.dispatchedAt > 0, 'a successful dispatch stamps the row')
+assert.equal(dispatchedRow.targetAlive, true, 'its target session is live')
+assert.equal(dispatchedRow.state, 'dispatched', 'a live but idle target reads as 已派发')
+
+const runOwnerId = (await readRow(boundId)).runSessionId
+const runOwner = live.get(runOwnerId)
+assert.ok(runOwner !== undefined, 'the row is bound to a session the registry knows')
+runOwner.status = 'running'
+assert.equal((await readRow(boundId)).state, 'running', 'a running target reads as 进行中')
+runOwner.status = 'idle'
+assert.equal((await readRow(boundId)).state, 'dispatched', 'and falls back to 已派发 when it stops')
+console.log('state   OK')
+
+// -- a stranded row neither spins nor blocks the queue ---------------------
+//
+// Leaving a failed row unstamped is what stops it being retired for good, but it
+// also leaves the row queue-eligible. Two things must therefore hold: the
+// automatic paths must not re-attempt it on every tick, and it must not sit at
+// the top of the queue holding up the rows behind it.
+
+// Clear the deck first: this section asserts on *which* row turn end picks, so
+// it must not depend on whatever earlier sections left pending.
+for (const leftover of (await registered.tool.execute({ action: 'list', all: true }, exec)).todos) {
+  if (!leftover.verified) await registered.tool.execute({ action: 'done', id: leftover.id }, exec)
+}
+
+const stranded = await postJson({
+  action: 'create',
+  title: '卡住的那条',
+  mode: 'resume',
+  dir: DIR,
+  sessionId: 'session-long-gone',
+})
+const strandedId = stranded.todo.id
+await postJson({ action: 'run', id: strandedId, sessionId: '' })
+assert.equal((await readRow(strandedId)).state, 'lost', 'the row is stranded')
+
+// A healthy row created after it sits *below* it in the queue.
+const healthy = await postJson({
+  action: 'create',
+  title: '后面那条能跑的',
+  mode: 'resume',
+  dir: DIR,
+  sessionId: agent.id,
+})
+assert.equal(healthy.ok, true, 'the healthy row is created')
+const healthyId = healthy.todo.id
+
+const beforeQueue = agent.sent.length
+await turnStopping()
+assert.equal(
+  agent.sent.length,
+  beforeQueue + 1,
+  'exactly one row is dispatched — the queue is not blocked and not double-sent',
+)
+assert.ok(
+  agent.sent[beforeQueue].content[0].text.includes('后面那条能跑的'),
+  'and it is the healthy row below that ran, not the stranded one',
+)
+assert.equal((await readRow(strandedId)).state, 'lost', 'the stranded row is still stranded')
+assert.equal((await readRow(healthyId)).state, 'dispatched', 'the healthy row was handed over')
+
+// The backoff holds: further turn ends must not re-attempt it immediately.
+await turnStopping()
+await turnStopping()
+const strandedAfter = await readRow(strandedId)
+assert.equal(strandedAfter.lostAttempts, 1, 'the retry backoff suppressed immediate re-attempts')
+assert.ok(
+  Date.now() - strandedAfter.lostAt < 60000,
+  'and its next automatic attempt is a minute away, not a tick away',
+)
+console.log('stranded OK')
 
 rmSync(home, { recursive: true, force: true })
 console.log('\nall host-half smoke checks passed')

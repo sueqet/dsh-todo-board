@@ -36,9 +36,45 @@ const MODE_HINT = {
   resume: 'AI 一停就自动把这条注入当前会话继续跑。',
   newSession: 'AI 一停就自动新建一个同目录会话来执行。',
 }
+/**
+ * Every row carries exactly one state chip, because a state you have to infer is
+ * a state you cannot see. An earlier version labelled only the states that "need
+ * attention" (已派发 / 进行中 / 悬住) and left 未派发 and 已完成 silent, on the
+ * theory that an empty checkbox and a struck-through title already said it —
+ * in practice that meant most rows showed no state at all, which is exactly the
+ * question it was supposed to answer.
+ *
+ * Emphasis still varies, so a board of ordinary rows stays quiet: only 进行中 and
+ * a stuck row shout, and `done` recedes.
+ */
+const STATE_CHIP = {
+  pending: { label: '未派发', cls: 'idle', hint: '还没交给任何会话；点 ▶ 可以立即接续到当前会话。' },
+  dispatched: { label: '已派发', cls: 'sent', hint: '已经派发过一次，目标会话还在。' },
+  running: { label: '进行中', cls: 'run', hint: '目标会话正在执行这条待办。' },
+  done: { label: '已完成', cls: 'ok', hint: 'AI 已勾选完成；等你验收。' },
+  lost: { label: '目标会话丢失', cls: 'bad', hint: '派发失败，已停下等待处理。' },
+}
+/**
+ * What a parked row is actually parked on. `lostKind` comes from the host, so a
+ * refusal is labelled by its real cause rather than always blaming a missing
+ * session. The hint is the way out, not a restatement of the problem.
+ */
+const LOST_CHIP = {
+  'no-session': {
+    label: STATE_CHIP.lost.label,
+    hint: '改执行模式、换目录，或等到点自动重试（间隔会逐次拉长）。',
+  },
+  image: {
+    label: '图片被拒',
+    hint: '目标模型不接受图片输入：换一个支持图片的模型，或先移除待办上的图片。',
+  },
+  spawn: { label: '建会话失败', hint: '新建会话没有成功；修好后会按退避自动重试。' },
+  preset: { label: '预设解析失败', hint: '解析 agent preset 失败；修好后会按退避自动重试。' },
+  agents: { label: '服务不可用', hint: 'agents 服务不可用；恢复后会按退避自动重试。' },
+}
 const MONO = 'ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace'
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.5.0'
+const BUILD = '0.6.1'
 
 const CSS = `
 .dshtb-root{position:fixed;top:56px;right:16px;z-index:2147482000;pointer-events:auto;
@@ -106,11 +142,13 @@ const CSS = `
 .dshtb-modes button:hover{color:var(--tb-ink);border-color:var(--tb-line2)}
 .dshtb-modes button.on{border-color:var(--tb-accent);color:var(--tb-accent);font-weight:600}
 .dshtb-hint{font-size:11.5px;color:var(--tb-dim);line-height:1.4}
-.dshtb-dir input{width:100%;padding:6px 9px;border-radius:8px;border:1px dashed var(--tb-line);
+.dshtb-dir input{flex:1;min-width:0;padding:6px 9px;border-radius:8px;border:1px dashed var(--tb-line);
   background:transparent;color:var(--tb-dim);font:inherit;font-size:12px;outline:none;
   transition:border-color .12s,color .12s}
 .dshtb-when{display:flex;align-items:center;gap:7px;font:600 11px/1 ${MONO};color:var(--tb-dim)}
 .dshtb-when .lbl{letter-spacing:.08em}
+.dshtb-dir{display:flex;align-items:center;gap:7px;font:600 11px/1 ${MONO};color:var(--tb-dim)}
+.dshtb-dir .lbl{letter-spacing:.08em;flex:0 0 auto}
 .dshtb-when input{flex:1;min-width:0;padding:5px 8px;border-radius:8px;border:1px dashed var(--tb-line);
   background:transparent;color:var(--tb-dim);font:inherit;font-size:12px;outline:none;
   transition:border-color .12s,color .12s;color-scheme:dark light}
@@ -191,7 +229,22 @@ const CSS = `
 button.dshtb-chip{cursor:pointer;font:inherit;color:inherit;transition:border-color .12s,color .12s}
 button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-chip.sent{color:var(--tb-ok);border-color:var(--tb-ok)}
+.dshtb-chip.idle{opacity:.72}
+.dshtb-chip.ok{color:var(--tb-ok);border-color:var(--tb-line)}
 .dshtb-chip.due{color:var(--tb-warn);border-color:var(--tb-warn);font-weight:600}
+.dshtb-chip.run{color:var(--tb-accent);border-color:var(--tb-accent);font-weight:600}
+.dshtb-chip.bad{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);
+  font-weight:600;cursor:help}
+.dshtb-chip.quiet{opacity:.62}
+.dshtb-chip.quiet:hover{opacity:1}
+/* The ✕ sits beside the time chip rather than inside it: a button may not nest
+   another control, and keep it narrow so the pair reads as one chip. */
+.dshtb-chip.x{padding:2px 5px;cursor:pointer}
+.dshtb-whenchip{display:inline-flex;align-items:center;gap:2px;padding:1px 3px;border-radius:6px;
+  background:var(--dsw-alias-bg-layer-1);border:1px solid var(--tb-accent)}
+.dshtb-whenedit{padding:1px 4px;border:0;background:transparent;color:var(--tb-ink);
+  font:inherit;font-size:11px;outline:none;color-scheme:dark light}
+.dshtb-whenchip .dshtb-ic{width:18px;height:18px;font-size:10px}
 .dshtb-acts{display:flex;gap:1px;flex:0 0 auto;opacity:0;transition:opacity .12s}
 .dshtb-item:hover .dshtb-acts{opacity:1}
 .dshtb-ic{width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;
@@ -463,6 +516,26 @@ function clampLayout(layout) {
   return { x, y, w, h }
 }
 
+function sameLayout(a, b) {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+}
+
+/**
+ * The geometry the user actually chose, kept apart from the one being rendered.
+ *
+ * They differ whenever the viewport is too small for the choice: the rendered
+ * geometry is clamped to fit right now, while the chosen one is remembered, so
+ * widening the window again returns the panel to where it was put — the same
+ * position a reload would produce from disk. Re-clamping stays repeatable
+ * instead of being a one-way trip into the corner.
+ */
+function initialGeometry() {
+  const stored = loadLayout()
+  return { preferred: stored, clamped: stored === null ? null : clampLayout(stored) }
+}
+
 /**
  * A foldable section of the panel: its label doubles as the control that shows
  * and hides the body, so a folded panel still says what it is hiding.
@@ -523,9 +596,18 @@ function TodoBoard(props) {
   const [overId, setOverId] = React.useState('')
   const [editId, setEditId] = React.useState('')
   const [editText, setEditText] = React.useState('')
-  const [layout, setLayout] = React.useState(loadLayout)
+  /** Row whose schedule is being edited inline, and the draft time for it. */
+  const [whenId, setWhenId] = React.useState('')
+  const [whenDraft, setWhenDraft] = React.useState('')
+  // Geometry is read once per mount, lazily: `initialGeometry` touches
+  // localStorage, and the panel re-renders on every 2.5s poll, so calling it in
+  // a ref initializer (which evaluates its argument each render) would re-read
+  // storage forever.
+  const initial = React.useState(initialGeometry)[0]
+  const [layout, setLayout] = React.useState(initial.clamped)
   const [cordisFound, setCordisFound] = React.useState(true)
   const [sections, setSections] = React.useState(loadSections)
+  const preferredRef = React.useRef(initial.preferred)
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
   const inputRef = React.useRef(null)
@@ -535,6 +617,8 @@ function TodoBoard(props) {
 
   function applyLayout(next) {
     const clamped = clampLayout(next)
+    // A drag is an explicit choice, so record it as the preferred geometry too.
+    preferredRef.current = clamped
     layoutRef.current = clamped
     setLayout(clamped)
   }
@@ -589,10 +673,63 @@ function TodoBoard(props) {
   }
 
   function resetLayout() {
+    // Clearing the preferred geometry too, or the resize effect would clamp it
+    // straight back and the double-click restore would appear to do nothing.
+    preferredRef.current = null
     layoutRef.current = null
     setLayout(null)
     saveLayout(null)
   }
+
+  /**
+   * Keep the panel inside the viewport as the viewport changes.
+   *
+   * Dragging and resizing clamp already, but neither runs when the *window*
+   * changes size — so a panel parked at an absolute x is silently cropped once
+   * the window narrows, and a viewport that can never be that wide again (a
+   * smaller monitor, a permanent zoom) strands it for good. Re-clamping here is
+   * what makes the panel follow the viewport instead of leaving it behind.
+   *
+   * It re-derives from `preferredRef` rather than from what is currently
+   * rendered, so the clamp is repeatable: narrowing fits the panel on screen,
+   * and widening puts it back exactly where the user left it — the same result
+   * a reload would give. Nothing here is written to disk; the chosen geometry is
+   * only persisted by an actual drag or resize.
+   */
+  React.useEffect(() => {
+    const reclamp = () => {
+      setLayout((current) => {
+        if (current === null) return current
+        const preferred = preferredRef.current
+        const next = clampLayout(preferred === null ? current : preferred)
+        // Returning the same object lets React bail out, so a resize that
+        // changes nothing does not re-render the panel.
+        return sameLayout(next, current) ? current : next
+      })
+    }
+
+    window.addEventListener('resize', reclamp)
+    // `visualViewport` fires for browser zoom, which does not always resize.
+    if (window.visualViewport !== undefined && window.visualViewport !== null) {
+      window.visualViewport.addEventListener('resize', reclamp)
+    }
+    // Catch a viewport that changed before this effect attached (or while the
+    // tab was hidden and events were coalesced).
+    reclamp()
+
+    return () => {
+      window.removeEventListener('resize', reclamp)
+      if (window.visualViewport !== undefined && window.visualViewport !== null) {
+        window.visualViewport.removeEventListener('resize', reclamp)
+      }
+    }
+  }, [open])
+
+  // Keep the drag-time ref equal to the rendered geometry, so a reclamp (or any
+  // other state change) can never leave it pointing at a stale rect.
+  React.useEffect(() => {
+    layoutRef.current = layout
+  }, [layout])
 
   /** Fold one section of the panel away, or bring it back. */
   function toggleSection(id) {
@@ -761,6 +898,20 @@ function TodoBoard(props) {
     patch(todo.id, { schedule: value })
   }
 
+  /** Open the inline picker for one row, seeded with its current time. */
+  function beginWhen(todo) {
+    setWhenId(todo.id)
+    setWhenDraft(todo.schedule || '')
+  }
+
+  /** Commit the picker: an empty value clears the schedule, as it does at add. */
+  function commitWhen(id) {
+    const value = whenDraft
+    setWhenId('')
+    setWhenDraft('')
+    patch(id, { schedule: value })
+  }
+
   /** One desktop notification per reminder the host has stamped as due. */
   function notifyDue(list) {
     for (const todo of list) {
@@ -825,20 +976,19 @@ function TodoBoard(props) {
     if (dragId === todo.id) cls += ' dragging'
     if (overId === todo.id && dragId !== '' && dragId !== todo.id) cls += ' over'
 
+    // Only a row that has never been handed over can be dispatched by hand.
+    // Everything else is either already sent, already finished, or stuck on a
+    // session that no longer exists. If `state` is missing entirely (a browser
+    // half newer than its host, e.g. a half-applied update) fall back to the raw
+    // stamp, so the button degrades instead of locking every row.
+    const state = typeof todo.state === 'string' ? todo.state : (todo.dispatchedAt > 0 ? 'dispatched' : 'pending')
+    const runnable = state === 'pending'
+
+    // The directory is NOT a chip: the facts line under the title already names
+    // it in full, and the chip only repeated the basename. The schedule is the
+    // mirror image — it lives here as a chip and is deliberately absent from the
+    // facts line, so neither fact is stated twice on one row.
     const meta = [
-      h(
-        'span',
-        {
-          className: 'dshtb-chip',
-          key: 'd',
-          title: todo.dirPath
-            ? '工作目录：' + todo.dirPath
-            : '这条待办没有绑定目录（新增时目录留空且当前会话没有工作区）',
-        },
-        todo.dirLabel,
-      ),
-    ]
-    meta.push(
       h(
         'button',
         {
@@ -849,11 +999,89 @@ function TodoBoard(props) {
         },
         MODE_SHORT[todo.mode],
       ),
-    )
-    if (todo.dispatchedAt > 0 && !todo.aiDone) {
-      meta.push(h('span', { className: 'dshtb-chip sent', key: 's', title: '已经派发过一次' }, '已派发'))
+    ]
+    if (state === 'lost') {
+      const attempts = typeof todo.lostAttempts === 'number' && todo.lostAttempts > 1
+        ? '（已自动重试 ' + todo.lostAttempts + ' 次）'
+        : ''
+      // A parked row is not always a *missing session*: the target model can
+      // refuse images, and spawning can fail. Name the actual cause and fix.
+      const lost = LOST_CHIP[todo.lostKind] || LOST_CHIP['no-session']
+      meta.push(
+        h(
+          'span',
+          {
+            className: 'dshtb-chip bad',
+            key: 's',
+            title:
+              (todo.lostReason || '目标会话已不存在') + '，无法自动接续' + attempts + '。\n' + lost.hint,
+          },
+          lost.label,
+        ),
+      )
+    } else {
+      // Every other state gets its chip, always. `dispatched` additionally warns
+      // when the session it went to has since closed: that is *not* the same as
+      // 目标会话丢失 (a dispatch that never landed), and it is deliberately not
+      // auto-retried, because the work may already have been done once.
+      const chip = STATE_CHIP[state] || STATE_CHIP.pending
+      const title =
+        state === 'dispatched' && todo.targetAlive === false
+          ? chip.hint +
+            '\n但目标会话已经不在了。不确定它是否跑完，所以不会自动重试；想重跑就改执行模式或换目录。'
+          : chip.hint
+      meta.push(h('span', { className: 'dshtb-chip ' + chip.cls, key: 's', title }, chip.label))
     }
-    if (todo.schedule) {
+    // The schedule chip is always rendered, not only when a time is set: a row
+    // added without one must still be able to get it later, which is the whole
+    // point of editing the board rather than only composing into it.
+    if (whenId === todo.id) {
+      meta.push(
+        h(
+          'span',
+          { className: 'dshtb-whenchip', key: 'w' },
+          h('input', {
+            type: 'datetime-local',
+            className: 'dshtb-whenedit',
+            value: whenDraft,
+            autoFocus: true,
+            title: '选择到点执行的时间（留空 = 不定时）',
+            onChange: (e) => setWhenDraft(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                commitWhen(todo.id)
+              }
+              if (e.key === 'Escape') {
+                setWhenId('')
+                setWhenDraft('')
+              }
+            },
+          }),
+          h(
+            'button',
+            {
+              className: 'dshtb-ic',
+              title: '保存定时',
+              onClick: () => commitWhen(todo.id),
+            },
+            '\u2713',
+          ),
+          h(
+            'button',
+            {
+              className: 'dshtb-ic',
+              title: '取消',
+              onClick: () => {
+                setWhenId('')
+                setWhenDraft('')
+              },
+            },
+            '\u2715',
+          ),
+        ),
+      )
+    } else if (todo.schedule) {
       const due = typeof todo.dueAt === 'number' && todo.dueAt > 0 && todo.dueAt <= Date.now()
       meta.push(
         h(
@@ -861,12 +1089,36 @@ function TodoBoard(props) {
           {
             className: 'dshtb-chip' + (due ? ' due' : ''),
             key: 'w',
-            title: due
-              ? '已到时间：' + todo.schedule + '（点 ✕ 取消定时）'
-              : '定时执行：' + todo.schedule + '（点 ✕ 取消定时）',
+            title:
+              (due ? '已到时间：' : '定时执行：') + todo.schedule + '\n点这里改时间',
+            onClick: () => beginWhen(todo),
+          },
+          (due ? '\u23F0 ' : '\u25F4 ') + todo.schedule.slice(5).replace('T', ' ') + ' \u270E',
+        ),
+        // A sibling, not a nested control: an interactive element inside a
+        // button is invalid and its clicks are ambiguous.
+        h(
+          'button',
+          {
+            className: 'dshtb-chip x',
+            key: 'wx',
+            title: '取消定时',
             onClick: () => setSchedule(todo, ''),
           },
-          (due ? '\u23F0 ' : '\u25F4 ') + todo.schedule.slice(5).replace('T', ' ') + ' ✕',
+          '\u2715',
+        ),
+      )
+    } else {
+      meta.push(
+        h(
+          'button',
+          {
+            className: 'dshtb-chip quiet',
+            key: 'w',
+            title: '点这里给这条待办设置定时执行时间',
+            onClick: () => beginWhen(todo),
+          },
+          '\u25F4 不定时',
         ),
       )
     }
@@ -904,12 +1156,12 @@ function TodoBoard(props) {
       ? h('div', { className: 'dshtb-t', title: '双击编辑', onDoubleClick: () => beginEdit(todo) }, todo.title)
       : editNode
 
-    // A plain monospace readout under the title: the two facts the chips can
-    // bury in a narrow panel are always visible here — the working directory
-    // this task runs in, and the time it is scheduled for.
+    // A plain monospace readout under the title: the directory in full, which a
+    // long path would otherwise bury in a narrow panel, plus the bound session.
+    // The schedule is deliberately NOT repeated here — its own chip carries it —
+    // so no single fact is stated twice on one row.
     const facts = []
     facts.push('目录 ' + (todo.dirPath || todo.dir || '(未指定)'))
-    facts.push(todo.schedule ? '定时 ' + todo.schedule : '不定时')
     if (todo.runSessionId && todo.mode !== 'newSession') {
       facts.push('会话 ' + todo.runSessionId.slice(-6))
     }
@@ -1017,8 +1269,16 @@ function TodoBoard(props) {
           'button',
           {
             className: 'dshtb-ic',
-            title: todo.dispatchedAt > 0 ? '重新接续到当前会话' : '立即接续到当前会话',
-            disabled: busy,
+            // Once a row has been handed to a session, sending it again just
+            // duplicates work — the automatic paths decide when it runs next.
+            // A row whose target is gone is also locked, because ▶ would send it
+            // to whatever session happens to be open, not the one it belongs to.
+            title: runnable
+              ? '立即接续到当前会话'
+              : state === 'lost'
+                ? '目标会话已丢失，不能手动派发；改模式/换目录或等到点自动重试'
+                : '已派发，不能重复派发',
+            disabled: busy || !runnable,
             onClick: () =>
               call('run', { id: todo.id, sessionId: currentId === undefined ? '' : currentId }),
           },
@@ -1279,8 +1539,15 @@ function TodoBoard(props) {
           h(
             'div',
             { className: 'dshtb-dir' },
+            h('span', { className: 'lbl' }, '目录'),
             h('input', {
-              placeholder: cwd === '' ? '目录（绝对路径）' : '目录：' + cwd,
+              // Empty means 「跟随当前会话」, not 「no directory」, and the old
+              // placeholder ("目录：<cwd>") read like a value that was already
+              // filled in. Say what an empty field will actually do instead.
+              placeholder: cwd === '' ? '留空 = 用当前会话的工作目录' : '留空 = ' + cwd,
+              title:
+                '这条待办归到哪个目录：它决定分组、决定「当前目录」筛选，' +
+                '也决定回合结束后由哪个会话来接续。留空 = 跟随当前会话的工作目录。',
               value: dirInput,
               onChange: (e) => setDirInput(e.target.value),
             }),
