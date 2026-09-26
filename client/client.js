@@ -93,8 +93,15 @@ const SKINS = [
   { id: 'dense', name: '紧凑', glyph: '\u2263', hint: '同样极简，字号行距各降一档，一屏能看更多条' },
 ]
 
-/** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.10.1'
+/**
+ * The plugin build this browser half belongs to, printed in the footer.
+ *
+ * It tracks `package.json`'s version rather than "the last time this file
+ * changed": the footer answers "which build am I actually looking at?", and the
+ * host and browser halves of one release are one build. `client-smoke.mjs` pins
+ * the two together, because a footer that lies is worse than no footer.
+ */
+const BUILD = '0.11.0'
 
 /**
  * Severity filters in the log view, most severe first.

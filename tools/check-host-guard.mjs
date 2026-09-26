@@ -1,15 +1,20 @@
 /**
- * Mutation check for the v0.9.1 host-half fixes.
+ * Mutation check for the host-half behaviours that no other suite can prove.
  *
- * Three fixes landed together and each one is the kind that a green suite keeps
- * green after it is deleted:
+ * Every mutant here is the kind that a green suite keeps green after the code is
+ * deleted — which is the only reason this file exists:
  *
- *   1. **the approval gate** — delete it and every write still works, silently;
- *   2. **channel convergence** — prefer the local restatement again and the board
- *      route once more accepts any local process;
- *   3. **the `ctx.inject` rewrite** — go back to a load-order-dependent read at
- *      apply time and the model tool silently disappears (the panel keeps
- *      working, which is exactly why nobody noticed for so long).
+ *   - **the approval gate** (v0.9.1) — delete it and every write still works, silently;
+ *   - **channel convergence** (v0.9.1) — prefer the local restatement again and the
+ *     board route once more accepts any local process;
+ *   - **the `ctx.inject` rewrite** (v0.9.1) — go back to a load-order-dependent read
+ *     at apply time and the model tool silently disappears (the panel keeps working,
+ *     which is exactly why nobody noticed for so long);
+ *   - **the model-side actions** (v0.9.1) — drop a guard and `update` half-applies,
+ *     `reorder` crosses directories, or `dispatch` re-sends a row;
+ *   - **planning** (v0.11.0) — the promises that make a one-approval batch honest
+ *     (all-or-nothing, and a dialog that shows the plan) and the two thresholds plus
+ *     the one-shot rule that keep the planning offer from becoming noise.
  *
  * So each is applied in turn and the suite that owns it must FAIL. The mutant is
  * reverted on every exit path — including Ctrl-C — and `lib/index.js` is verified
@@ -137,6 +142,58 @@ const mutants = [
     suite: 'tools/check-session-format.mjs',
     from: "noticeMessage(todoContent(todo), 'TODO 接续（新会话）：' + todo.title)",
     to: "noticeMessage(todoPrompt(todo), 'TODO 接续（新会话）：' + todo.title)",
+  },
+  {
+    // v0.11.0 planning. Each mutant deletes one of the promises the feature
+    // makes: the batch is all-or-nothing, the dialog shows the plan, the offer
+    // fires on staged work (and only on staged work), and the command injects a
+    // real user message rather than a string.
+    // The real all-or-nothing risk: skip the offending item instead of refusing
+    // the batch. The good items then land, and the user gets a DIFFERENT plan
+    // from the one they approved.
+    name: 'a bad item is skipped instead of refusing the whole plan',
+    suite: 'tools/smoke.mjs',
+    from: "              return { message: where + 'add 需要提供 title，整批未创建（一条都没落库）。', todos: [] }",
+    to: '              continue',
+  },
+  {
+    name: 'the approval dialog only says "add" (the plan is approved unread)',
+    suite: 'tools/smoke.mjs',
+    from: "      if (Array.isArray(input.items) && input.items.length > 0) {\n        const titles = input.items.map((entry, at) => {",
+    to: "      if (false) {\n        const titles = input.items.map((entry, at) => {",
+  },
+  {
+    name: 'the planning offer never fires (the nudge is dead code)',
+    suite: 'tools/smoke.mjs',
+    from: '    return hits >= PLAN_NUDGE_MIN_MARKERS',
+    to: '    return false',
+  },
+  {
+    name: 'the planning offer fires on anything long (it becomes noise)',
+    suite: 'tools/smoke.mjs',
+    from: '    if (body.length < PLAN_NUDGE_MIN_CHARS) return false',
+    to: '    if (false) return false',
+  },
+  {
+    name: 'the offer repeats every step (the user is nagged)',
+    suite: 'tools/smoke.mjs',
+    from: '      if (planningNudged.has(agent)) return next()',
+    to: '      if (false) return next()',
+  },
+  {
+    name: '/todo injects a bare string as message content',
+    suite: 'tools/check-live.mjs',
+    from: "                [{ type: 'text', text }, ...attachments],",
+    to: '                text,',
+  },
+  {
+    // A rejected parameter schema means the tool SILENTLY does not exist — the
+    // exact failure mode the ctx.inject rewrite was about. `format` is outside the
+    // supported subset, so this is a schema the harness refuses.
+    name: 'the tool schema uses a keyword the harness does not support',
+    suite: 'tools/check-live.mjs',
+    from: "          title: { type: 'string', description: '这一条待办的内容（一句话，可独立验收）。' },",
+    to: "          title: { type: 'string', format: 'uri', description: '这一条待办的内容（一句话，可独立验收）。' },",
   },
 ]
 

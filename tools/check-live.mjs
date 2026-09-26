@@ -33,7 +33,10 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const DSH = 'C:/Users/XIAO/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/'
 const CORDIS = process.env.DSHTB_CORDIS ?? 'file:///' + DSH + 'cordis/lib/index.js'
@@ -41,9 +44,10 @@ const TOOLS = process.env.DSHTB_TOOLS ?? 'file:///' + DSH + 'dsh-tools/lib/index
 
 let Context
 let ToolRuntime
+let assertSupportedJsonSchema
 try {
   ;({ Context } = await import(CORDIS))
-  ;({ ToolRuntime } = await import(TOOLS))
+  ;({ ToolRuntime, assertSupportedJsonSchema } = await import(TOOLS))
 } catch (err) {
   console.error('SKIP: the real cordis / dsh-tools runtime is not reachable at ' + CORDIS)
   console.error('      set DSHTB_CORDIS / DSHTB_TOOLS to their lib/index.js to run this check.')
@@ -152,6 +156,133 @@ assert.ok(
   'the model tool registers even though the tools service arrived after the plugin',
 )
 console.log('live    OK — late-arriving services still register (the ctx.inject race stays fixed)')
+
+// -- the skill and the command -----------------------------------------------
+//
+// Both are `ctx.inject` + effect, exactly like the tool, so the same load-order
+// trap applies: a stub that hands the service over at apply time would prove
+// nothing. Here `skills` and `commands` are provided AFTER the plugin row — the
+// order that used to break registration silently — and the registrations are
+// then read back out.
+
+const skillsRegistered = []
+const commandsRegistered = []
+
+root.reflect.provide(
+  'skills',
+  {
+    register(skill) {
+      skillsRegistered.push(skill)
+      return () => {
+        const at = skillsRegistered.indexOf(skill)
+        if (at >= 0) skillsRegistered.splice(at, 1)
+      }
+    },
+  },
+  undefined,
+)
+root.reflect.provide(
+  'commands',
+  {
+    register(command) {
+      commandsRegistered.push(command)
+      return () => {
+        const at = commandsRegistered.indexOf(command)
+        if (at >= 0) commandsRegistered.splice(at, 1)
+      }
+    },
+  },
+  undefined,
+)
+await sleep(80)
+
+assert.equal(skillsRegistered.length, 1, 'the planning skill registers once the service appears')
+assert.equal(skillsRegistered[0].name, 'todo-board-planning', 'under its documented name')
+assert.ok(
+  typeof skillsRegistered[0].content === 'string' && skillsRegistered[0].content.length > 200,
+  'with a real body, so the manual is not an empty promise',
+)
+assert.equal(
+  skillsRegistered[0].source,
+  'dsh-todo-board',
+  'and a source, which validateDefinition() requires of any loaded skill',
+)
+
+assert.equal(commandsRegistered.length, 1, 'the /todo command registers the same way')
+assert.equal(commandsRegistered[0].name, 'todo', 'under the short name')
+assert.equal(commandsRegistered[0].input.attachments, true, 'accepting the composer attachments')
+
+// The handler must inject a ContentBlock[] user message: a bare string is the
+// exact shape that made a dispatched session unopenable once already.
+const injected = []
+const commandResult = commandsRegistered[0].handler({
+  agent: { followup: (message) => injected.push(message) },
+  rawInput: '把日志模块拆开',
+  attachments: [],
+})
+assert.equal(commandResult.kind, 'success', 'and its handler succeeds without a GUI')
+assert.equal(injected.length, 1, 'injecting exactly one message')
+assert.equal(injected[0].role, 'user', 'which is a user message')
+assert.ok(
+  Array.isArray(injected[0].content) && injected[0].content[0].type === 'text',
+  'whose content is ContentBlock[], not a string',
+)
+console.log('live-plan OK — skill and command register against real cordis, after the plugin row')
+
+// -- the tool's parameter schema, against the REAL validator -----------------
+//
+// The stub registry in smoke.mjs records a definition without validating it, so a
+// schema the harness would reject looks fine there — while in production the tool
+// simply never exists. `items` added a nested object/array tree, which is exactly
+// the kind of thing the supported subset can refuse (`format`, `pattern`, a type
+// array, `oneOf` beside `properties`…). So the real validator gets the real
+// constant.
+
+const hostSource = readFileSync(join(ROOT, 'lib', 'index.js'), 'utf8')
+
+/** Evaluate one `const NAME = {…}` object literal out of the plugin source. */
+function schemaConstant(name) {
+  const marker = 'const ' + name + ' = {'
+  const start = hostSource.indexOf(marker)
+  assert.ok(start >= 0, 'found ' + name + ' in lib/index.js')
+  let depth = 0
+  for (let i = hostSource.indexOf('{', start); i < hostSource.length; i++) {
+    if (hostSource[i] === '{') depth += 1
+    else if (hostSource[i] === '}') {
+      depth -= 1
+      if (depth === 0) {
+        const text = hostSource.slice(hostSource.indexOf('{', start), i + 1)
+        // The literals reference these four module constants and nothing else.
+        return new Function(
+          'MODES', 'MAX_IMAGES_PER_TODO', 'MAX_PLAN_ITEMS', 'TOOL_STATES',
+          'return ' + text,
+        )(
+          ['remind', 'resume', 'newSession'],
+          4,
+          20,
+          ['pending', 'dispatched', 'running', 'done', 'lost'],
+        )
+      }
+    }
+  }
+  throw new Error('unbalanced braces in ' + name)
+}
+
+const parameters = schemaConstant('TOOL_PARAMETERS')
+assertSupportedJsonSchema(parameters)
+assertSupportedJsonSchema(schemaConstant('TOOL_OUTPUT_SCHEMA'))
+assert.ok(
+  parameters.properties.items !== undefined && parameters.properties.items.items.type === 'object',
+  'the batch parameter is declared as a nested object array',
+)
+
+// Negative control: without this, the two lines above would also pass if the
+// validator accepted anything at all.
+assert.throws(
+  () => assertSupportedJsonSchema({ type: 'object', properties: { a: { type: 'string', format: 'uri' } } }),
+  'the validator really does reject an unsupported keyword',
+)
+console.log('live-schema OK — the tool parameters pass the harness validator (nested items included)')
 
 // -- the log sink, gated by the REAL exporter levels ------------------------
 

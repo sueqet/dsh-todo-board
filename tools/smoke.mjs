@@ -18,7 +18,7 @@ process.env.DSH_HOME = home
 
 const mod = await import('../lib/index.js')
 
-const registered = { tool: null, section: null, routes: [], listeners: [], effects: [] }
+const registered = { tool: null, section: null, routes: [], listeners: [], effects: [], skill: null, command: null }
 
 /**
  * What `ctx.get('connection')` finds — the harness' Host Connection gate.
@@ -209,6 +209,22 @@ function makeCtx() {
       if (key === 'workspaceRegistry') return workspaceStub
       if (key === 'webServer') return webServer
       if (key === 'connection') return connectionService
+      if (key === 'skills') {
+        return {
+          register(skill) {
+            registered.skill = skill
+            return () => {}
+          },
+        }
+      }
+      if (key === 'commands') {
+        return {
+          register(command) {
+            registered.command = command
+            return () => {}
+          },
+        }
+      }
       return undefined
     },
     on(event, listener) {
@@ -1336,6 +1352,253 @@ assert.equal(
   'an unknown id is reported, not thrown',
 )
 console.log('actions OK')
+
+// ------------------------------------------------------------ planning: batch
+//
+// One `add` for a whole plan is what makes planning usable: N steps would
+// otherwise cost N approvals. The price of that convenience is that ONE approval
+// now covers N rows, so the two things that matter are (a) the dialog shows every
+// step, and (b) a bad item leaves NOTHING behind — a half-built plan is a
+// different plan from the one the user approved.
+
+const PLAN_DIR = 'D:\\smoke\\plan'
+const planRows = async () =>
+  (await registered.tool.execute({ action: 'list', dir: PLAN_DIR }, exec)).todos
+
+const plan = await registered.tool.execute(
+  {
+    action: 'add',
+    dir: PLAN_DIR,
+    items: [
+      { title: '计划 1', note: '验收：跑 npm test', mode: 'resume' },
+      { title: '计划 2', note: '验收：截图', mode: 'resume' },
+      { title: '计划 3' },
+    ],
+  },
+  exec,
+)
+assert.ok(plan.message.includes('已新增计划：3 条'), 'the batch reports itself as a plan: ' + plan.message)
+assert.equal(plan.todos.length, 3, 'and returns all three rows')
+
+const planBoard = await planRows()
+assert.deepEqual(
+  planBoard.map((row) => row.title),
+  ['计划 1', '计划 2', '计划 3'],
+  'the array order IS the execution order',
+)
+assert.deepEqual(
+  planBoard.map((row) => row.mode),
+  ['resume', 'resume', 'remind'],
+  'each step keeps its own mode (the third defaults to remind)',
+)
+
+// The notes have to survive: they are the only context a dispatched step gets.
+await registered.tool.execute({ action: 'note', id: planBoard[0].id, note: '验收：跑 npm test' }, exec)
+const planNotes = (await registered.tool.execute({ action: 'list', dir: PLAN_DIR }, exec)).todos
+assert.equal(planNotes.length, 3, 'the plan is still three rows after a note edit')
+
+// -- all-or-nothing ---------------------------------------------------------
+
+const countBefore = (await planRows()).length
+const badPlan = await registered.tool.execute(
+  {
+    action: 'add',
+    dir: PLAN_DIR,
+    items: [{ title: '不该落库的 A' }, { title: '   ' }, { title: '不该落库的 B' }],
+  },
+  exec,
+)
+assert.ok(badPlan.message.includes('整批未创建'), 'a blank title refuses the batch: ' + badPlan.message)
+assert.equal(badPlan.todos.length, 0, 'and returns no rows')
+assert.equal(
+  (await planRows()).length,
+  countBefore,
+  'and NOT ONE row landed — the earlier titles in that batch did not sneak in',
+)
+
+const badModePlan = await registered.tool.execute(
+  { action: 'add', dir: PLAN_DIR, items: [{ title: 'A' }, { title: 'B', mode: 'teleport' }] },
+  exec,
+)
+assert.ok(badModePlan.message.includes('mode'), 'an unknown mode refuses the batch too')
+assert.equal((await planRows()).length, countBefore, 'again with nothing written')
+
+const badSchedulePlan = await registered.tool.execute(
+  { action: 'add', dir: PLAN_DIR, items: [{ title: 'A' }, { title: 'B', schedule: '明天' }] },
+  exec,
+)
+assert.ok(badSchedulePlan.message.includes('schedule'), 'a bad schedule refuses the batch')
+assert.equal((await planRows()).length, countBefore, 'and writes nothing')
+
+// The ceiling exists so an approval is still readable; it refuses rather than
+// silently truncating, because a silently shorter plan is a lie about scope.
+const oversized = await registered.tool.execute(
+  {
+    action: 'add',
+    dir: PLAN_DIR,
+    items: Array.from({ length: 21 }, (_, i) => ({ title: '步骤 ' + (i + 1) })),
+  },
+  exec,
+)
+assert.ok(oversized.message.includes('最多创建 20 条'), 'an oversized plan is refused: ' + oversized.message)
+assert.equal((await planRows()).length, countBefore, 'and nothing was written')
+
+// A single add still behaves exactly as before (items absent, title present).
+const single = await registered.tool.execute({ action: 'add', title: '单条仍照旧', dir: PLAN_DIR }, exec)
+assert.ok(single.message.includes('已新增待办'), 'a plain single add still takes the old path')
+assert.equal(single.todos.length, 1, 'and returns exactly one row')
+
+// -- the approval dialog shows the PLAN, not just "add" ----------------------
+
+const planGate = registered.listeners.find((entry) => entry.event === 'tools/pre-execute')
+const planReason = planGate.listener(
+  {
+    name: 'todo_board',
+    arguments: { action: 'add', items: [{ title: '步骤甲' }, { title: '步骤乙', mode: 'resume' }] },
+  },
+  () => {
+    throw new Error('the gate must not pass a batch through')
+  },
+).reason
+assert.ok(planReason.includes('新增计划（2 步'), 'the dialog names it as a plan: ' + planReason)
+assert.ok(planReason.includes('1. 步骤甲') && planReason.includes('2. 步骤乙'), 'and lists every step')
+assert.ok(
+  planReason.includes('会自动派发'),
+  'and warns when any step would run itself: ' + planReason,
+)
+console.log('plan    OK')
+
+// --------------------------------------------------- planning: skill + command
+
+assert.ok(registered.skill !== null, 'the planning skill is registered')
+assert.equal(registered.skill.name, 'todo-board-planning', 'under its documented name')
+assert.equal(registered.skill.provider, undefined, 'letting the harness default it to the runtime provider')
+assert.ok(
+  registered.skill.invocation.modelInvocable === true && registered.skill.invocation.userInvocable === true,
+  'loadable by the model and reachable by the user',
+)
+assert.ok(
+  typeof registered.skill.content === 'string' && registered.skill.content.includes('items'),
+  'and its body explains the batch call',
+)
+// The skill carries the template, so a user who finds the skill can copy it too.
+assert.ok(
+  registered.skill.content.includes('用 TODO 板把这件事拆成可执行的步骤'),
+  'the skill body embeds the paste-able template',
+)
+
+assert.ok(registered.command !== null, 'the /todo command is registered')
+assert.equal(registered.command.name, 'todo', 'under the short name')
+assert.equal(registered.command.input.attachments, true, 'and accepts the user attachments')
+
+const commandAgent = { sent: [], followup(message) { this.sent.push(message) } }
+const commandResult = registered.command.handler({
+  agent: commandAgent,
+  rawInput: '把日志模块拆开并做完',
+  attachments: [],
+})
+assert.equal(commandResult.kind, 'success', 'a usable invocation succeeds: ' + JSON.stringify(commandResult))
+assert.equal(commandAgent.sent.length, 1, 'and injects exactly one message')
+const injected = commandAgent.sent[0]
+assert.equal(injected.role, 'user', 'as a user message, so the model treats it as the request')
+assert.ok(
+  Array.isArray(injected.content) && injected.content[0].type === 'text',
+  'with ContentBlock[] content (a bare string would corrupt the session log)',
+)
+assert.ok(
+  injected.content[0].text.includes('【目标】把日志模块拆开并做完'),
+  'the goal replaces the template placeholder: ' + injected.content[0].text.slice(0, 80),
+)
+
+// No goal is a usage error: injecting the template alone would make the model
+// plan the literal placeholder text.
+const emptyResult = registered.command.handler({ agent: commandAgent, rawInput: '  ', attachments: [] })
+assert.equal(emptyResult.kind, 'error', 'an empty /todo is refused')
+assert.ok(emptyResult.text.includes('/todo <目标>'), 'and says how to call it: ' + emptyResult.text)
+assert.equal(commandAgent.sent.length, 1, 'injecting nothing for it')
+console.log('plan-ui OK')
+
+// ------------------------------------------------- planning: the deterministic nudge
+//
+// The judgement is the feature: a nudge that fires on everything is noise, and
+// one that never fires is dead code. So both directions are driven through the
+// real hook, with a board that is (and is not) empty.
+
+const preStep = registered.listeners.find((entry) => entry.event === 'agent/pre-step')
+assert.ok(preStep !== undefined, 'the planning nudge listens on agent/pre-step')
+
+const NUDGE_DIR = 'D:\\smoke\\nudge'
+const nudgeAgent = (dir) => ({
+  id: 'session-nudge',
+  session: { header: { id: 'session-nudge', cwd: dir } },
+})
+const userMessage = (text) => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
+
+/** Run the hook; returns the messages the step ends up with (or the original). */
+async function viaPreStep(agent, messages) {
+  const downstream = { kind: 'enter', messages }
+  const out = await preStep.listener(
+    { agent, messages },
+    () => Promise.resolve(downstream),
+  )
+  return out === undefined || out === null ? messages : out.messages
+}
+
+const staged = [
+  '这次要做的东西比较多，麻烦按顺序来，别一次全塞进去：',
+  '1. 先把日志模块的接口抽出来，保持行为不变',
+  '2. 然后补单元测试，覆盖失败路径',
+  '3. 接着把面板上的展示改成新接口',
+  '4. 最后更新 README 与 CHANGELOG',
+  '',
+  '验收标准是 npm test 全绿、npm run guard 全绿，并且我能从 README 里看懂怎么用。',
+  '另外注意不要动 public API，不要引入新依赖，不要把已经稳定的调度代码重构掉；',
+  '改完我会再跑一遍真实浏览器检查，所以面板的计算样式不要破。',
+  '如果中途发现要加步骤，先告诉我再改范围。',
+].join('\n')
+
+assert.ok(staged.length >= 200, 'the fixture is long enough to be a staged task: ' + staged.length)
+
+let after = await viaPreStep(nudgeAgent(NUDGE_DIR), [userMessage(staged)])
+assert.equal(after.length, 2, 'a staged request on an EMPTY board gets one nudge')
+assert.ok(
+  after[1].content[0].text.includes('规划提示'),
+  'and the nudge is the planning hint: ' + after[1].content[0].text.slice(0, 60),
+)
+assert.equal(after[1].source.kind, 'plugin', 'sourced as a plugin notice, not as the user speaking')
+
+// Once per session: the same agent asking again is answered by silence.
+after = await viaPreStep(nudgeAgent(NUDGE_DIR), [userMessage(staged)])
+const repeatAgent = nudgeAgent(NUDGE_DIR)
+await viaPreStep(repeatAgent, [userMessage(staged)])
+after = await viaPreStep(repeatAgent, [userMessage(staged)])
+assert.equal(after.length, 1, 'the same session is never nudged twice')
+
+// A SHORT message is not a plan, even with several staged markers. This is the
+// LENGTH threshold on its own: the markers are all here, so only the length check
+// can be what keeps the offer from firing.
+after = await viaPreStep(nudgeAgent(NUDGE_DIR), [
+  userMessage(['1. 改错别字', '2. 跑一下测试', '3. 提交'].join('\n')),
+])
+assert.equal(after.length, 1, 'a short but structured message is left alone')
+
+// A LONG message with no staged markers is left alone too — the other threshold,
+// on its own.
+after = await viaPreStep(nudgeAgent(NUDGE_DIR), [userMessage('报错如下：' + 'x'.repeat(400))])
+assert.equal(after.length, 1, 'a long but unstructured message is left alone')
+
+// A board with work on it is mid-plan: no offer.
+await registered.tool.execute({ action: 'add', title: '正在做的', dir: NUDGE_DIR }, exec)
+after = await viaPreStep(nudgeAgent(NUDGE_DIR), [userMessage(staged)])
+assert.equal(after.length, 1, 'a directory that already has todos is not offered planning again')
+
+// Tool results and injected notices must never trigger the offer — the plugin
+// would otherwise be talking to itself.
+after = await viaPreStep(nudgeAgent('D:\\smoke\\nudge2'), [
+  { role: 'user', source: { kind: 'tool' }, content: [{ type: 'text', text: staged }] },
+])
+assert.equal(after.length, 1, 'a tool result is not a user request')
+console.log('nudge   OK')
 
 rmSync(home, { recursive: true, force: true })
 console.log('\nall host-half smoke checks passed')
