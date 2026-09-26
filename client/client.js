@@ -101,7 +101,7 @@ const SKINS = [
  * host and browser halves of one release are one build. `client-smoke.mjs` pins
  * the two together, because a footer that lies is worse than no footer.
  */
-const BUILD = '0.11.0'
+const BUILD = '0.11.1'
 
 /**
  * Severity filters in the log view, most severe first.
@@ -232,6 +232,9 @@ const CSS = `
 .dshtb-list::-webkit-scrollbar,.dshtb-donelist::-webkit-scrollbar{width:9px}
 .dshtb-list::-webkit-scrollbar-thumb,.dshtb-donelist::-webkit-scrollbar-thumb{background:var(--tb-line2);border-radius:5px;
   border:3px solid transparent;background-clip:content-box}
+/* The one line that explains the mode chip, inside the list it applies to. Small
+   and dim on purpose: it is read once, and it must never read as a control. */
+.dshtb-listhint{padding:7px 12px 3px;font-size:11px;line-height:1.45;color:var(--tb-dim);opacity:.9}
 .dshtb-group{display:flex;align-items:center;gap:7px;padding:10px 12px 4px;
   font:600 10.5px/1 ${MONO};letter-spacing:.09em;text-transform:uppercase;color:var(--tb-dim)}
 .dshtb-group::after{content:'';flex:1;height:1px;background:var(--tb-line)}
@@ -2567,7 +2570,19 @@ function TodoBoard(props) {
                           : '这里还没有待办',
                     ),
                   )
-                : h('div', { className: 'dshtb-list', key: 'list-body' }, rows),
+                : h(
+                    'div',
+                    { className: 'dshtb-list', key: 'list-body' },
+                    // The note explains the mode chip the rows carry, so it lives
+                    // with them — and only when there ARE rows: with nothing on the
+                    // board there is no mode to change and no advice worth giving.
+                    h(
+                      'div',
+                      { className: 'dshtb-listhint' },
+                      '你可以通过点击更改任务执行模式，但不建议任务开始执行后更改',
+                    ),
+                    rows,
+                  ),
           })),
       // The other half of the list, between the queue and the panel footer. It is
       // a separate section rather than a filter on the list: ticking the round box

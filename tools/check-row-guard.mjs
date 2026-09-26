@@ -32,6 +32,8 @@
  *  27. saving a note sends no patch (the edit is a no-op)
  *  28. a verified row stays in the open list (it never moves to 已完成)
  *  29. the status line is hidden again (build marker and open count disappear)
+ *  30. the mode hint is not rendered (the mode chip goes unexplained)
+ *  31. the mode hint is reworded (the text drifts from what was asked for)
  *
  * Patterns are matched against a normalized (LF) copy because the working tree
  * is checked out with CRLF on Windows, then the replacement is mapped back onto
@@ -257,6 +259,23 @@ const mutants = [
       '        : h(\n' +
       "            'div',\n" +
       "            { className: 'dshtb-foot', key: 'foot' },",
+  },
+  {
+    // v0.11.1: the hint is the only place the panel says what the mode chip does,
+    // so dropping it silently removes the explanation rather than the feature.
+    name: 'the mode hint is not rendered (the mode chip goes unexplained)',
+    from:
+      "                    h(\n" +
+      "                      'div',\n" +
+      "                      { className: 'dshtb-listhint' },\n" +
+      "                      '你可以通过点击更改任务执行模式，但不建议任务开始执行后更改',\n" +
+      '                    ),',
+    to: '                    null,',
+  },
+  {
+    name: 'the mode hint is reworded (the text drifts from what was asked for)',
+    from: "'你可以通过点击更改任务执行模式，但不建议任务开始执行后更改',",
+    to: "'点模式标签可以改执行模式。',",
   },
 ]
 

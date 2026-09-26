@@ -1644,6 +1644,50 @@ assert.equal(
 )
 console.log('refuse  OK')
 
+// -- the mode hint inside the open list --------------------------------------
+//
+// One line explaining the mode chip the rows carry. Three things matter about it:
+// it is inside the list (not floating somewhere else), it says what it is
+// supposed to say, and it is TEXT — a hint that looks like a control is worse
+// than no hint, because people click it.
+
+snapshot.todos = [
+  todo({ id: 'h1', title: '有行的', order: 0 }),
+  todo({ id: 'h2', title: '另一行', order: 1 }),
+]
+tree = remount()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+
+const HINT_TEXT = '你可以通过点击更改任务执行模式，但不建议任务开始执行后更改'
+const listNode = findByClass(tree, 'dshtb-list')[0]
+const hintNode = findByClass(tree, 'dshtb-listhint')[0]
+assert.ok(listNode !== undefined, 'the open list is rendered')
+assert.ok(hintNode !== undefined, 'and the mode hint is rendered')
+assert.equal(textOf(hintNode), HINT_TEXT, 'with exactly the wording asked for')
+assert.equal(hintNode.type, 'div', 'as plain text, never a control')
+assert.ok(
+  listNode.children.includes(hintNode),
+  'and INSIDE the list, so it travels with the rows it is about',
+)
+assert.equal(
+  listNode.children.filter((child) => child !== null && child.props !== undefined && child.props.className === 'dshtb-listhint').length,
+  1,
+  'rendered once, not once per row and not once per group',
+)
+
+// With no rows there is no mode to change, so the advice would be noise.
+snapshot.todos = []
+tree = remount()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(
+  findByClass(tree, 'dshtb-listhint').length,
+  0,
+  'an empty list carries no mode hint (there is no mode to change)',
+)
+console.log('modehint OK')
+
 // -- the 已完成 section: ticking the round box MOVES the row -----------------
 //
 // The point of the section is that a verified row leaves the queue. Everything

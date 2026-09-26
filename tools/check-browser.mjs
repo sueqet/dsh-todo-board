@@ -119,6 +119,7 @@ function buildPanel(skin) {
         <div class="dshtb-modes"><button class="on">提醒</button><button>续跑</button></div>
       </div>
       <div class="dshtb-list">
+        <div class="dshtb-listhint">你可以通过点击更改任务执行模式，但不建议任务开始执行后更改</div>
         <div class="dshtb-group">plugin</div>
         <div class="dshtb-item">
           <span class="dshtb-grip">⠿</span>
@@ -169,7 +170,7 @@ UNBROKEN-${'z'.repeat(160)}</div>
           </div>
         </div>
       </div>
-      <div class="dshtb-foot"><span>v0.11.0</span><button class="dshtb-link">清理</button></div>
+      <div class="dshtb-foot"><span>v0.11.1</span><button class="dshtb-link">清理</button></div>
     </div>\`
   host.appendChild(root)
   return root
@@ -329,6 +330,7 @@ function measure(skin) {
     doneList: pick('.dshtb-donelist'),
     doneRow: pick('.dshtb-item.done'),
     doneTitle: pick('.dshtb-item.done .dshtb-t'),
+    listHint: pick('.dshtb-listhint'),
   }
 }
 
@@ -619,7 +621,41 @@ try {
     check(m.quietChip.display !== 'none', where + ': the schedule chip is rendered')
   }
 
-  // ---------------------------------------------------------------- the note
+  // ------------------------------------------------------------ the mode hint
+  //
+  // "Small text, and never a control" is a computed-style fact, not a source fact:
+  // a hint that inherits a button's cursor or a chip's background reads as
+  // clickable, and people click it. Both are measured here.
+  console.log('\n=== mode hint (computed styles) ===')
+  for (const [name, m] of Object.entries(measured)) {
+    const where = name === 'null' ? 'untagged' : name
+    check(
+      m.listHint !== null && m.listHint.display !== 'none' && m.listHint.fontSize > 0,
+      where + ': the mode hint is rendered and legible',
+      JSON.stringify(m.listHint),
+    )
+    check(
+      m.listHint.cursor !== 'pointer' && m.listHint.background === 'rgba(0, 0, 0, 0)',
+      where + ': and does not look like a control (no pointer cursor, no button background)',
+      JSON.stringify({ cursor: m.listHint.cursor, background: m.listHint.background }),
+    )
+    check(
+      m.listHint.scrollWidth <= m.listHint.clientWidth + 1,
+      where + ': the hint wraps instead of widening the panel',
+      JSON.stringify({ scrollWidth: m.listHint.scrollWidth, clientWidth: m.listHint.clientWidth }),
+    )
+  }
+  check(
+    ticket.listHint.fontSize <= ticket.title2.fontSize,
+    'the hint is smaller than a row title — it is an aside, not content',
+    'hint=' + ticket.listHint.fontSize + ' title=' + ticket.title2.fontSize,
+  )
+  check(
+    ticket.listHint.text.includes('不建议任务开始执行后更改'),
+    'and it still carries the sentence it exists for',
+    ticket.listHint.text,
+  )
+
   //
   // The note is what the model is told before it starts, so "invisible" and
   // "there is no note" must not look the same — and it is text, so it has to wrap
