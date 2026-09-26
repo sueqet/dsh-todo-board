@@ -1565,7 +1565,14 @@ assert.ok(
   after[1].content[0].text.includes('规划提示'),
   'and the nudge is the planning hint: ' + after[1].content[0].text.slice(0, 60),
 )
-assert.equal(after[1].source.kind, 'plugin', 'sourced as a plugin notice, not as the user speaking')
+// Producer-owned source kind, not the retired v3 wrapper `{ kind: 'plugin',
+// plugin: … }`: session format v4 refuses a newly written message whose source
+// kind is not producer-owned, and the refusal fails the whole turn.
+assert.equal(
+  after[1].source.kind,
+  'plugin:dsh-todo-board',
+  'sourced as a producer-owned plugin notice, not as the user speaking',
+)
 
 // Once per session: the same agent asking again is answered by silence.
 after = await viaPreStep(nudgeAgent(NUDGE_DIR), [userMessage(staged)])

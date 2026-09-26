@@ -20,6 +20,19 @@
  * validates with. A control case pins the old failure mode, so the check cannot
  * quietly become vacuous if a refactor makes the validator unreachable.
  *
+ * The message SOURCE bit us a second time, when DSH moved to session format v4.
+ * The notice still carried the retired v3 wrapper
+ *
+ *     source: { kind: 'plugin', plugin: 'dsh-todo-board', form: 'notice' }
+ *
+ * and `dsh-session-format` refuses every NEWLY written v4 message whose source
+ * kind is not producer-owned — "format v4 message requires a producer-owned
+ * source kind" — which fails the whole turn. (Reading an old log is different:
+ * the v3 -> v4 migration edge rewrites the wrapper on the way in.) The source
+ * asserts below therefore pin `plugin:dsh-todo-board`, and note that
+ * `adoptSessionEvent` does NOT validate sources — that check lives in the
+ * persistence layer — so a source control built on it would pass vacuously.
+ *
  *   node tools/check-session-format.mjs
  *
  * Requires the DSH install; skipped loudly if `dsh-session` is missing.
@@ -183,8 +196,22 @@ for (const { via, message } of injected) {
   assert.equal(message.role, 'user', via + ': role is user')
   assert.equal(typeof message.id, 'string', via + ': carries an id')
   assert.ok(message.id !== '', via + ': id is non-empty')
-  assert.equal(message.source?.kind, 'plugin', via + ': carries a plugin source')
-  assert.equal(message.source?.plugin, 'dsh-todo-board', via + ': names this plugin')
+  // Session format v4 requires a PRODUCER-OWNED source kind. The old v3
+  // wrapper (`{ kind: 'plugin', plugin: 'dsh-todo-board' }`) is retired: the
+  // persistence layer refuses it outright with "format v4 message requires a
+  // producer-owned source kind", which fails the turn that produced the notice.
+  // The v3 -> v4 migration edge rewrites that wrapper when READING an old log,
+  // but a newly written message must carry `plugin:<name>` from the start.
+  assert.equal(
+    message.source?.kind,
+    'plugin:dsh-todo-board',
+    via + ': carries a producer-owned source kind',
+  )
+  assert.equal(
+    message.source?.plugin,
+    undefined,
+    via + ': carries no retired v3 plugin wrapper field',
+  )
   assert.ok(Array.isArray(message.content), via + ': content is ContentBlock[]')
 
   // The real thing: the same validation the persistence layer runs on load.
@@ -209,11 +236,17 @@ assert.ok(
 )
 assert.equal(withImage.message.content.length, 2, 'one text block plus one image block')
 
-// ---- Non-vacuous control: the old shape MUST be rejected ------------------
+// ---- Non-vacuous control: the bare-string content MUST be rejected --------
 //
-// `surfaceOp` is present on purpose: it is validated before content, so
+// The source here is the CURRENT producer-owned shape on purpose. The source
+// kind is validated by the persistence layer (`dsh-session-format`), not by
+// `adoptSessionEvent`, so leaving a retired wrapper here would only make the
+// fixture look like a second, silent bug. With a valid source the rejection
+// can only be about content.
+//
+// `surfaceOp` is present on purpose too: it is validated before content, so
 // omitting it would make this pass for the wrong reason and stop guarding the
-// bug it exists for. The event must be rejected specifically for its content.
+// bug it exists for.
 
 assert.throws(
   () =>
@@ -225,7 +258,7 @@ assert.throws(
         id: 'x',
         role: 'user',
         content: '【TODO 板 · 自动接续】…',
-        source: { kind: 'plugin', plugin: 'dsh-todo-board', form: 'notice' },
+        source: { kind: 'plugin:dsh-todo-board', form: 'notice' },
       },
     }),
   /invalid content/,

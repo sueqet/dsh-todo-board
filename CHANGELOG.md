@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.11.2
+
+适配 DSH **会话格式 v4**（session format v4）——这是一次**不向后兼容**的适配，插件与 DSH 必须一起升级。
+
+- **修复：注入待办时整轮失败**（DSH 0.1.7 起）。
+  - 症状很重：不是在面板上少一条提示，而是**那一轮整个失败**。
+  - 原因是我们注入的用户消息还带着 **v3 时代的 plugin wrapper**：`{ kind: 'plugin', plugin: 'dsh-todo-board', form: 'notice' }`。
+    v4 要求 source 的 kind 是**生产者自有的**（producer-owned），持久化层会直接抛
+    `format v4 message requires a producer-owned source kind` 并拒绝写入 —— 而拒绝写入就把整轮带走了。
+  - 现在写成 `{ kind: 'plugin:dsh-todo-board', form: 'notice' }`：`plugin:<包名>` 就是生产者自有的 kind，且不再带 `plugin` 字段。
+  - 为什么以前是对的、现在不对：**读旧日志和新写消息是两条路**。v3 → v4 迁移边在**读**老日志时会把旧 wrapper 重写掉，
+    所以历史日志照常打得开；但**新写**的消息必须一开始就是 v4 形状，迁移边管不到它。
+- **`engines.dsh` 从 `>=0.1.0-rc.6` 收紧到 `>=0.1.7-rc.2`**。
+  - v4 从 DSH `0.1.7-alpha.1` 开始提供，`0.1.7-rc.2` 是第一个正式发布。
+  - 旧 DSH 上装新版 = 每个回合都会失败，所以宁可让 npm 在**安装时**就警告。
+  - 反过来，**≤ 0.11.1 的版本在 DSH ≥ 0.1.7 上不能用**：需要旧版请装 `0.6.1`（最后一个 v3 兼容版本，已打 tag `v0.6.1`）。
+- **删掉 `dsh.client.inject` 里已不存在的 `@deepseek-ai/dsh-client-runtime`**。
+  - 新版 DSH 里这个包已经没有了；这个字段只做「是不是字符串数组」的解析、不校验存在性，
+    所以它一直是无害的陈旧声明。删掉只是让这份清单如实反映真实依赖（浏览器半边只 `require('react')`）。
+- 测试：`tools/smoke.mjs` 与 `tools/check-session-format.mjs` 的 source 断言改成钉住 `plugin:dsh-todo-board`，
+  并**额外断言不得残留 v3 的 `plugin` 字段**（只断言新 kind 的话，两种写法都带上时仍然是绿的）。
+  `check-session-format.mjs` 里那个「必须被拒绝」的反例也换成当前的 source 形状 ——
+  否则它会因为 source 不合法而通过，看起来还在守着老 bug，实际上什么都没守。
+- README 新增「DSH 版本要求」一节：写明 v4 从哪个版本开始、旧 DSH 该装哪个版本、以及为什么这是硬要求。
+
 ## 0.11.1
 
 - **待办列表里加了一行说明**：`你可以通过点击更改任务执行模式，但不建议任务开始执行后更改`

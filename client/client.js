@@ -101,7 +101,7 @@ const SKINS = [
  * host and browser halves of one release are one build. `client-smoke.mjs` pins
  * the two together, because a footer that lies is worse than no footer.
  */
-const BUILD = '0.11.1'
+const BUILD = '0.11.2'
 
 /**
  * Severity filters in the log view, most severe first.

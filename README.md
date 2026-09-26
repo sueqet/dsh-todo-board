@@ -35,6 +35,29 @@ Restart the profile afterwards (`dsh web` again): the plugin is a row in the hos
 dsh plugin --profile web remove dsh-todo-board
 ```
 
+## DSH 版本要求 / DSH version requirement
+
+**0.11.2 起要求 DSH ≥ 0.1.7-rc.2（session format v4）。**
+
+As of 0.11.2 this plugin requires **DSH ≥ 0.1.7-rc.2 (session format v4)**.
+
+插件往会话里注入待办时会带一个**生产者自有的 source**（`{ kind: 'plugin:dsh-todo-board', form: 'notice' }`）。这是 DSH **会话格式 v4** 的硬性要求（`dsh-session-format-v3-to-v4`：`format v4 message requires a producer-owned source kind`）；v4 从 DSH **0.1.7-alpha.1** 开始提供，**0.1.7-rc.2 是第一个正式发布**。
+
+The messages this plugin injects carry a **producer-owned source** (`{ kind: 'plugin:dsh-todo-board', form: 'notice' }`). Session format **v4** requires exactly that — the retired v3 wrapper `{ kind: 'plugin', plugin: … }` is refused, and the refusal **fails the whole turn**, not just the notice. Format v4 lands in DSH **0.1.7-alpha.1**; **0.1.7-rc.2** is the first released carrier.
+
+| 你的 DSH | 装哪个版本 / Install | 为什么 / Why |
+| --- | --- | --- |
+| ≥ 0.1.7-rc.2 | `dsh plugin --profile web add dsh-todo-board` | 当前版本 / current |
+| ≤ 0.1.6（含 `0.1.5-rc.3`，现 npm `latest`） | `dsh plugin --profile web add dsh-todo-board@0.6.1` | 最后一版 v3 兼容版本 / last v3-era release |
+
+`package.json` 的 `engines.dsh` 已相应写成 `>=0.1.7-rc.2`，装错版本时 npm 会直接给出警告，而不是等到回合跑起来才报错。
+
+`engines.dsh` says `>=0.1.7-rc.2`, so a mismatched install warns at install time instead of failing mid-turn later.
+
+旧版本（**≤ 0.11.1，含 npm 上发过的 0.4.1 / 0.5.0 / 0.6.1**）不会自动升级 —— 升级 DSH 之后请一并升级本插件。
+
+Releases up to **0.11.1** (including the published `0.4.1` / `0.5.0` / `0.6.1`) do not carry this adaptation: after upgrading DSH, upgrade the plugin too.
+
 ## 快速上手 / Quick start
 
 1. 右上角出现浮窗，输入一条待办，选执行模式，点「添加」。
