@@ -512,9 +512,17 @@ assert.equal(
 )
 assert.deepEqual(
   findByClass(tree, 'dshtb-sect').map((node) => textOf(node).replace(/[▾▸]/g, '')),
-  ['新增待办', '待办列表 2', '已完成 1', '面板'],
+  ['新增待办', '待办列表 2', '已完成 1'],
   'every section is labelled with its own state — and the verified row counts as 已完成, not as 待办',
 )
+// The status line is not a section: no header, nothing to fold, and therefore no
+// way to hide the two facts it carries.
+assert.equal(
+  findByClass(tree, 'dshtb-sect').some((node) => textOf(node).includes('面板')),
+  false,
+  'the status line has no section header any more',
+)
+assert.equal(findByClass(tree, 'dshtb-foot').length, 1, 'and the status line itself is still there')
 console.log('render  OK')
 
 // -- folding a section away keeps its header as the way back ---------------
@@ -546,6 +554,14 @@ assert.equal(findByClass(tree, 'dshtb-list').length, 0, 'and the open list is st
 assert.ok(
   JSON.parse(storage.get('dsh.todoBoard.sections.v1')).done === false,
   'folding the completed section is persisted like the others',
+)
+// Every section is folded away right now. The status line has to still be there:
+// it is the one element whose disappearance would be a lie by omission ("which
+// build am I looking at?", "how much is actually left?").
+assert.equal(findByClass(tree, 'dshtb-foot').length, 1, 'the status line survives folding every section')
+assert.ok(
+  textOf(findByClass(tree, 'dshtb-foot')[0]).includes('未验收'),
+  'still carrying the open count',
 )
 tree = click(sectionButton(tree, '已完成'))
 assert.equal(findByClass(tree, 'dshtb-donelist').length, 1, 'unfolding brings the completed list back')

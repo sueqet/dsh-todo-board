@@ -169,7 +169,7 @@ UNBROKEN-${'z'.repeat(160)}</div>
           </div>
         </div>
       </div>
-      <div class="dshtb-foot"><span>v0.10.0</span><button class="dshtb-link">清理</button></div>
+      <div class="dshtb-foot"><span>v0.10.1</span><button class="dshtb-link">清理</button></div>
     </div>\`
   host.appendChild(root)
   return root
@@ -672,6 +672,38 @@ try {
     ticket.doneRow.opacity < 1 && ticket.doneTitle.textDecorationLine === 'line-through',
     'a completed row is dimmed and its title struck through',
     JSON.stringify({ opacity: ticket.doneRow.opacity, decoration: ticket.doneTitle.textDecorationLine }),
+  )
+
+  // ------------------------------------------------------------ status line
+  //
+  // v0.10.1 stopped folding the status line away. "Always there" is a layout
+  // property, so it is measured: give the card more height than its content and
+  // require the line to sit on the bottom edge rather than floating after the
+  // list. The fixture is short on purpose; without free space nothing pins.
+  const pinned = JSON.parse(await evaluate(cdp, `(() => {
+    const root = buildPanel('ticket')
+    const card = root.querySelector('.dshtb-card')
+    card.style.height = '620px'
+    void card.offsetHeight
+    const foot = root.querySelector('.dshtb-foot').getBoundingClientRect()
+    const box = card.getBoundingClientRect()
+    return JSON.stringify({
+      gap: Math.round(box.bottom - foot.bottom),
+      cardHeight: Math.round(box.height),
+      footPadding: getComputedStyle(root.querySelector('.dshtb-foot')).padding,
+      lastChild: card.lastElementChild === root.querySelector('.dshtb-foot'),
+      headers: root.querySelectorAll('.dshtb-sect').length,
+    })
+  })()`))
+  check(
+    pinned.cardHeight > 500 && pinned.gap >= 0 && pinned.gap <= 1,
+    'the status line is pinned to the panel’s bottom edge, not left floating after the list',
+    JSON.stringify(pinned),
+  )
+  check(
+    pinned.footPadding.startsWith('8px 12px') && pinned.lastChild === true,
+    'and it is the panel’s own last line at the panel’s padding — no header, nothing folded around it',
+    JSON.stringify(pinned),
   )
 
   check(

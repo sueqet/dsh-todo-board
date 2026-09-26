@@ -94,7 +94,7 @@ const SKINS = [
 ]
 
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.10.0'
+const BUILD = '0.10.1'
 
 /**
  * Severity filters in the log view, most severe first.
@@ -326,7 +326,7 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 /* One short line, not an empty box: an empty section should cost nothing. */
 .dshtb-doneempty{padding:6px 12px 8px;font-size:11.5px;color:var(--tb-dim);opacity:.85}
 .dshtb-foot{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:8px 12px;
-  border-top:1px solid var(--tb-line);
+  border-top:1px solid var(--tb-line);margin-top:auto;
   font:600 11px/1 ${MONO};font-variant-numeric:tabular-nums;color:var(--tb-dim)}
 .dshtb-link{padding:2px 6px;border:1px solid var(--tb-line);border-radius:6px;background:transparent;
   color:var(--tb-dim);font:inherit;cursor:pointer;transition:background .12s,color .12s,border-color .12s}
@@ -890,10 +890,10 @@ function saveLayout(layout) {
  * composer is something you do once, not once per page load.
  */
 const SECTIONS_KEY = 'dsh.todoBoard.sections.v1'
-const SECTION_IDS = ['compose', 'list', 'done', 'panel']
+const SECTION_IDS = ['compose', 'list', 'done']
 
 function loadSections() {
-  const state = { compose: true, list: true, done: true, panel: true }
+  const state = { compose: true, list: true, done: true }
   try {
     const raw = window.localStorage.getItem(SECTIONS_KEY)
     if (raw === null) return state
@@ -2598,44 +2598,44 @@ function TodoBoard(props) {
       data !== null && data !== undefined && data.storageError
         ? h('div', { className: 'dshtb-err' }, data.storageError)
         : null,
-      ...(logOpen
-        ? []
-        : foldable({
-            id: 'panel',
-            name: '面板',
-            open: sections.panel,
-            onToggle: toggleSection,
-            body: h(
-              'div',
-              { className: 'dshtb-foot', key: 'panel-body' },
-              h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
-              h('span', null, '未验收 ' + openCount),
-              awaitingVerify > 0 ? h('span', null, '· 待验 ' + awaitingVerify) : null,
-              h('span', { className: 'dshtb-sp' }),
-              verifiedCount > 0
-                ? h(
-                    'button',
-                    {
-                      className: 'dshtb-link',
-                      title: '删除所有已验收的条目（共 ' + verifiedCount + ' 条）',
-                      onClick: () => call('clearVerified'),
-                    },
-                    '清理已验收 ' + verifiedCount,
-                  )
-                : null,
-              h(
-                'button',
-                {
-                  className: 'dshtb-link' + (cordisFound ? '' : ' off'),
-                  title: cordisFound
-                    ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
-                    : '找不到 Cordis 入口，暂时打不开',
-                  onClick: openCordisPanel,
-                },
-                'Cordis Plugin',
-              ),
+      // The status line is NOT a section any more. It carries exactly two facts —
+      // which build is live and how much is still open — and a fact you have to
+      // unfold to read is worse than useless: it can be folded away and then lie
+      // by omission. So it has no header, no fold, and no stored state; the
+      // `.dshtb-sp` keeps the two facts on the left and the two functional
+      // entries (empty the 已完成 list, open the Cordis panel) on the right.
+      logOpen
+        ? null
+        : h(
+            'div',
+            { className: 'dshtb-foot', key: 'foot' },
+            h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
+            h('span', { title: '还没验收的条数' }, '未验收 ' + openCount),
+            awaitingVerify > 0 ? h('span', { title: 'AI 已完成、等你验收' }, '· 待验 ' + awaitingVerify) : null,
+            h('span', { className: 'dshtb-sp' }),
+            verifiedCount > 0
+              ? h(
+                  'button',
+                  {
+                    className: 'dshtb-link',
+                    title: '删除所有已验收的条目（共 ' + verifiedCount + ' 条）',
+                    onClick: () => call('clearVerified'),
+                  },
+                  '清理已验收 ' + verifiedCount,
+                )
+              : null,
+            h(
+              'button',
+              {
+                className: 'dshtb-link' + (cordisFound ? '' : ' off'),
+                title: cordisFound
+                  ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
+                  : '找不到 Cordis 入口，暂时打不开',
+                onClick: openCordisPanel,
+              },
+              'Cordis Plugin',
             ),
-          })),
+          ),
       h('div', {
         className: 'dshtb-resize',
         title: '拖动缩放 · 双击还原',

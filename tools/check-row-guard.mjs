@@ -31,6 +31,7 @@
  *  26. a note is not rendered (the context the model gets stays invisible)
  *  27. saving a note sends no patch (the edit is a no-op)
  *  28. a verified row stays in the open list (it never moves to 已完成)
+ *  29. the status line is hidden again (build marker and open count disappear)
  *
  * Patterns are matched against a normalized (LF) copy because the working tree
  * is checked out with CRLF on Windows, then the replacement is mapped back onto
@@ -239,6 +240,23 @@ const mutants = [
     name: 'a verified row stays in the open list (it never moves to 已完成)',
     from: '  const visible = scope\n    .filter((t) => !t.verified)',
     to: '  const visible = scope\n    .filter(() => true)',
+  },
+  {
+    // v0.10.1: the status line stopped being a foldable section precisely because
+    // a folded-away build marker and open count are a lie by omission.
+    name: 'the status line is hidden again (build marker and open count disappear)',
+    from:
+      '      logOpen\n' +
+      '        ? null\n' +
+      '        : h(\n' +
+      "            'div',\n" +
+      "            { className: 'dshtb-foot', key: 'foot' },",
+    to:
+      '      true\n' +
+      '        ? null\n' +
+      '        : h(\n' +
+      "            'div',\n" +
+      "            { className: 'dshtb-foot', key: 'foot' },",
   },
 ]
 
