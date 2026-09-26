@@ -127,16 +127,49 @@ function buildPanel(skin) {
           </div>
           <div class="dshtb-body">
             <div class="dshtb-t">下一条要做的</div>
+            <div class="dshtb-note">第一行：写给模型的上下文
+第二行：这里应该还在（两行以内）
+第三行：这一行必须被夹掉，否则折叠根本没生效
+UNBROKEN-${'z'.repeat(160)}</div>
             <div class="dshtb-facts">目录 D:\\\\DSH\\\\plugin</div>
             <div class="dshtb-meta">
               <button class="dshtb-chip">续跑</button>
+              <button class="dshtb-chip dshtb-notebtn">✎ 备注</button>
               <span class="dshtb-chip run">进行中</span>
               <button class="dshtb-chip quiet">◴ 不定时</button>
             </div>
           </div>
         </div>
+        <div class="dshtb-item">
+          <span class="dshtb-grip">⠿</span>
+          <div class="dshtb-checks">
+            <button class="dshtb-cb ai"></button><button class="dshtb-cb me"></button>
+          </div>
+          <div class="dshtb-body">
+            <div class="dshtb-t">正在写备注的</div>
+            <div class="dshtb-noteedit">
+              <textarea class="dshtb-notearea">编辑中的备注</textarea>
+              <button class="dshtb-notesave">保存</button>
+              <button class="dshtb-notecancel">取消</button>
+            </div>
+            <div class="dshtb-facts">目录 D:\\\\DSH\\\\plugin</div>
+          </div>
+        </div>
       </div>
-      <div class="dshtb-foot"><span>v0.9.1</span><button class="dshtb-link">清理</button></div>
+      <button class="dshtb-sect"><span class="car">▾</span>已完成 1</button>
+      <div class="dshtb-donelist">
+        <div class="dshtb-group">plugin</div>
+        <div class="dshtb-item done">
+          <div class="dshtb-checks">
+            <button class="dshtb-cb ai on">✓</button><button class="dshtb-cb me on">✓</button>
+          </div>
+          <div class="dshtb-body">
+            <div class="dshtb-t">已经验收的</div>
+            <div class="dshtb-facts">目录 D:\\\\DSH\\\\plugin</div>
+          </div>
+        </div>
+      </div>
+      <div class="dshtb-foot"><span>v0.10.0</span><button class="dshtb-link">清理</button></div>
     </div>\`
   host.appendChild(root)
   return root
@@ -262,6 +295,16 @@ function measure(skin) {
       opacity: cs.opacity,
       background: cs.backgroundColor,
       letterSpacing: cs.letterSpacing,
+      // Enough to tell "clamped" apart from "declared clamped": the clamp is only
+      // real if the content box is shorter than what it contains.
+      whiteSpace: cs.whiteSpace,
+      lineClamp: cs.getPropertyValue('-webkit-line-clamp').trim(),
+      textDecorationLine: cs.textDecorationLine,
+      cursor: cs.cursor,
+      scrollWidth: node.scrollWidth,
+      clientWidth: node.clientWidth,
+      scrollHeight: node.scrollHeight,
+      clientHeight: node.clientHeight,
     }
   }
   return {
@@ -278,6 +321,14 @@ function measure(skin) {
     quietChip: pick('.dshtb-chip.quiet'),
     foot: pick('.dshtb-foot'),
     row: pick('.dshtb-item'),
+    note: pick('.dshtb-note'),
+    noteButton: pick('.dshtb-notebtn'),
+    noteArea: pick('.dshtb-notearea'),
+    noteSave: pick('.dshtb-notesave'),
+    noteCancel: pick('.dshtb-notecancel'),
+    doneList: pick('.dshtb-donelist'),
+    doneRow: pick('.dshtb-item.done'),
+    doneTitle: pick('.dshtb-item.done .dshtb-t'),
   }
 }
 
@@ -567,6 +618,61 @@ try {
     check(m.stateChip.display !== 'none', where + ': the state chip is rendered')
     check(m.quietChip.display !== 'none', where + ': the schedule chip is rendered')
   }
+
+  // ---------------------------------------------------------------- the note
+  //
+  // The note is what the model is told before it starts, so "invisible" and
+  // "there is no note" must not look the same — and it is text, so it has to wrap
+  // rather than widen the panel. Both are properties of layout, not of the source.
+  console.log('\n=== note (computed styles) ===')
+  for (const [name, m] of Object.entries(measured)) {
+    const where = name === 'null' ? 'untagged' : name
+    check(m.note !== null && m.note.display !== 'none' && m.note.fontSize > 0,
+      where + ': the note is rendered and legible')
+    check(m.note.whiteSpace === 'pre-wrap',
+      where + ': the note keeps the line breaks the user typed',
+      m.note.whiteSpace)
+    check(m.note.scrollWidth <= m.note.clientWidth + 1,
+      where + ': and a long unbroken token wraps instead of widening the row',
+      JSON.stringify({ scrollWidth: m.note.scrollWidth, clientWidth: m.note.clientWidth }))
+    check(m.noteButton !== null && m.noteButton.display !== 'none',
+      where + ': the note control is rendered')
+    check(m.noteArea !== null && m.noteArea.display !== 'none' && m.noteArea.fontSize > 0,
+      where + ': the note editor is rendered and legible')
+    check(m.noteSave.display !== 'none' && m.noteCancel.display !== 'none',
+      where + ': with its own save and cancel controls')
+    check(m.doneList !== null && m.doneList.display !== 'none',
+      where + ': the 已完成 list is rendered')
+    check(m.doneRow !== null && m.doneRow.display !== 'none' && m.doneTitle.fontSize > 0,
+      where + ': and its rows are legible')
+  }
+
+  // The clamp: two lines in the ticket and plain skins, one in dense. Measured as
+  // "the box is shorter than its content", because a declared clamp that loses the
+  // cascade would otherwise pass and the note would simply run to full length.
+  check(
+    ticket.note.lineClamp === '2' && ticket.note.scrollHeight > ticket.note.clientHeight,
+    'the ticket skin clamps a long note to two lines, and really hides the rest',
+    JSON.stringify({ clamp: ticket.note.lineClamp, scroll: ticket.note.scrollHeight, client: ticket.note.clientHeight }),
+  )
+  check(
+    plain.note.lineClamp === '2' && plain.note.scrollHeight > plain.note.clientHeight,
+    'plain keeps the same two lines',
+    JSON.stringify({ clamp: plain.note.lineClamp }),
+  )
+  check(
+    dense.note.lineClamp === '1' && dense.note.scrollHeight > dense.note.clientHeight,
+    'the dense skin shows one line at most',
+    JSON.stringify({ clamp: dense.note.lineClamp, scroll: dense.note.scrollHeight, client: dense.note.clientHeight }),
+  )
+
+  // A finished row reads as put away, and that is a cascade fact: both rules live
+  // on `.dshtb-item.done`, which a later base rule could easily outrank.
+  check(
+    ticket.doneRow.opacity < 1 && ticket.doneTitle.textDecorationLine === 'line-through',
+    'a completed row is dimmed and its title struck through',
+    JSON.stringify({ opacity: ticket.doneRow.opacity, decoration: ticket.doneTitle.textDecorationLine }),
+  )
 
   check(
     dense.title2.fontSize < ticket.title2.fontSize,

@@ -512,8 +512,8 @@ assert.equal(
 )
 assert.deepEqual(
   findByClass(tree, 'dshtb-sect').map((node) => textOf(node).replace(/[▾▸]/g, '')),
-  ['新增待办', '待办列表 3', '面板'],
-  'the three sections are labelled with their own state',
+  ['新增待办', '待办列表 2', '已完成 1', '面板'],
+  'every section is labelled with its own state — and the verified row counts as 已完成, not as 待办',
 )
 console.log('render  OK')
 
@@ -535,9 +535,20 @@ assert.ok(
 tree = click(sectionButton(tree, '待办列表'))
 assert.equal(findByClass(tree, 'dshtb-list').length, 0, 'the folded list is gone')
 assert.ok(
-  textOf(sectionButton(tree, '待办列表')).includes('待办列表 3'),
+  textOf(sectionButton(tree, '待办列表')).includes('待办列表 2'),
   'the folded list header keeps its count',
 )
+
+// The completed section folds on its own, and only its own body goes away.
+tree = click(sectionButton(tree, '已完成'))
+assert.equal(findByClass(tree, 'dshtb-donelist').length, 0, 'the folded completed list is gone')
+assert.equal(findByClass(tree, 'dshtb-list').length, 0, 'and the open list is still folded')
+assert.ok(
+  JSON.parse(storage.get('dsh.todoBoard.sections.v1')).done === false,
+  'folding the completed section is persisted like the others',
+)
+tree = click(sectionButton(tree, '已完成'))
+assert.equal(findByClass(tree, 'dshtb-donelist').length, 1, 'unfolding brings the completed list back')
 
 // Unfolding restores it.
 tree = click(sectionButton(tree, '待办列表'))
@@ -1616,5 +1627,218 @@ assert.equal(
   'and the notice clears as soon as the gate lets the panel back in',
 )
 console.log('refuse  OK')
+
+// -- the 已完成 section: ticking the round box MOVES the row -----------------
+//
+// The point of the section is that a verified row leaves the queue. Everything
+// here is therefore about the move — it is out of the open list, it is in the
+// completed one, and the two controls that could put it back (the round box, and
+// the ✕) still work from where it now sits.
+
+const LONG_NOTE = '第一行\n第二行\n第三行'
+
+snapshot.todos = [
+  todo({ id: 'open1', title: '还没做的', order: 0, updatedAt: 50 }),
+  todo({ id: 'open2', title: 'AI 做完等你验收', order: 1, aiDone: true, updatedAt: 60 }),
+  todo({ id: 'done1', title: '早就验收的', order: 2, verified: true, updatedAt: 10 }),
+  todo({ id: 'done2', title: '刚验收的', order: 3, verified: true, updatedAt: 99, note: LONG_NOTE }),
+]
+tree = remount()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+
+const listRowTitles = () => findByClass(tree, 'dshtb-list').flatMap((node) => findByClass(node, 'dshtb-t')).map(textOf)
+const doneRowTitles = () => findByClass(tree, 'dshtb-donelist').flatMap((node) => findByClass(node, 'dshtb-t')).map(textOf)
+const doneRow = (title) => findByClass(tree, 'dshtb-donelist').flatMap((node) => findByClass(node, 'dshtb-item')).find((node) => textOf(node).includes(title))
+
+assert.deepEqual(
+  listRowTitles(),
+  ['还没做的', 'AI 做完等你验收'],
+  'a verified row is not in the open list any more',
+)
+assert.deepEqual(
+  doneRowTitles(),
+  ['刚验收的', '早就验收的'],
+  'it is in the completed list, newest first, so the row you just ticked is on top',
+)
+assert.ok(
+  textOf(sectionButton(tree, '已完成')).includes('已完成 2'),
+  'and the section header counts them',
+)
+
+// The move itself: the round box on an OPEN row sends verified:true, and once the
+// host answers, that row is in the other list.
+const beforeVerify = calls.length
+tree = click(findByClass(rowFor('还没做的'), 'dshtb-cb').find((node) => node.props['aria-label'] === '用户已验收'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(calls.length, beforeVerify + 1, 'ticking the round box sends exactly one request')
+assert.deepEqual(
+  calls[calls.length - 1],
+  { action: 'patch', id: 'open1', patch: { verified: true } },
+  'as a patch that verifies that row',
+)
+
+snapshot.todos = snapshot.todos.map((row) =>
+  row.id === 'open1' ? { ...row, verified: true, updatedAt: 200 } : row,
+)
+tree = render()
+assert.equal(
+  listRowTitles().includes('还没做的'),
+  false,
+  'after the host confirms, the row is gone from the open list',
+)
+assert.equal(doneRowTitles()[0], '还没做的', 'and it leads the completed list it just moved into')
+
+// The round box in the completed list is the way back — same control, same
+// meaning, so un-ticking is not a one-way trip.
+const back = doneRow('还没做的')
+const backBox = findByClass(back, 'dshtb-cb').find((node) => node.props['aria-label'] === '用户已验收')
+assert.equal(backBox.props.className.includes('on'), true, 'the box reads as ticked in the completed list')
+const beforeUndo = calls.length
+backBox.props.onClick({ preventDefault() {}, stopPropagation() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.deepEqual(
+  calls[calls.length - 1],
+  { action: 'patch', id: 'open1', patch: { verified: false } },
+  'un-ticking it patches verified:false, so the row can come back',
+)
+assert.equal(calls.length, beforeUndo + 1, 'and sends exactly one request')
+
+// A finished row is out of the queue, so it carries nothing that could reorder
+// it: no handle on screen, and no drop handling that would move open rows.
+const finishedRow = doneRow('刚验收的')
+assert.equal(finishedRow.props.draggable, false, 'a completed row cannot be dragged')
+assert.equal(findByClass(finishedRow, 'dshtb-grip').length, 0, 'and shows no drag handle')
+assert.equal(finishedRow.props.onDrop, undefined, 'nor is it a drop target')
+assert.equal(
+  findByClass(rowFor('AI 做完等你验收'), 'dshtb-grip').length,
+  1,
+  'while an open row still has its handle',
+)
+console.log('done    OK')
+
+// -- the note: preview under the title, its own editor -----------------------
+//
+// Host side has carried `note` all along (it is what the dispatched session is
+// told); the panel used to hide it, so the context a model would receive was
+// invisible until after dispatch. These cases are about seeing it and editing it
+// without a length limit and without touching the title editor.
+
+snapshot.todos = [
+  todo({ id: 'plain', title: '空白备注的', order: 0 }),
+  todo({ id: 'noted', title: '带备注的', order: 1, note: LONG_NOTE, updatedAt: 40 }),
+]
+tree = remount()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+
+const notedRow = rowFor('带备注的')
+const plainRow = rowFor('空白备注的')
+const noteNode = findByClass(notedRow, 'dshtb-note')[0]
+assert.ok(noteNode !== undefined, 'a note is rendered on the row')
+assert.equal(textOf(noteNode), LONG_NOTE, 'with every character of it, newlines included')
+assert.equal(noteNode.type, 'div', 'as plain text, not a control')
+assert.equal(
+  findByClass(plainRow, 'dshtb-note').length,
+  0,
+  'a row with no note renders no note block at all',
+)
+
+// The editor is its own control with its own class: the title editor is a
+// different element, and neither can be found while looking for the other.
+const noteButton = findByClass(notedRow, 'dshtb-notebtn')[0]
+assert.ok(noteButton !== undefined, 'the row offers a note control')
+assert.equal(noteButton.type, 'button', 'which is a real button')
+assert.equal(
+  findByClass(notedRow, 'dshtb-edit').length,
+  0,
+  'and is not the title editor',
+)
+
+noteButton.props.onClick({ preventDefault() {}, stopPropagation() {} })
+tree = render()
+const area = findByClass(rowFor('带备注的'), 'dshtb-notearea')[0]
+assert.ok(area !== undefined, 'opening it reveals a textarea')
+assert.equal(area.type, 'textarea', 'a textarea, not a single-line input')
+assert.equal(area.props.value, LONG_NOTE, 'seeded with the existing note, so it can be edited')
+assert.equal(
+  findByClass(rowFor('带备注的'), 'dshtb-note').length,
+  0,
+  'and the preview gives way to the editor rather than sitting behind it',
+)
+
+// Everything typed is sent verbatim: not trimmed, not capped. A silently dropped
+// character here would be a lie about the context the model gets.
+const huge = '  ' + 'x'.repeat(4000) + '\n尾巴  '
+area.props.onChange({ target: { value: huge } })
+tree = render()
+const beforeNoteSave = calls.length
+findByClass(rowFor('带备注的'), 'dshtb-notesave')[0].props.onClick({ preventDefault() {}, stopPropagation() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(calls.length, beforeNoteSave + 1, 'saving sends exactly one request')
+assert.equal(calls[calls.length - 1].action, 'patch', 'through the panel patch action')
+assert.equal(calls[calls.length - 1].id, 'noted', 'for the row that was edited')
+assert.equal(
+  calls[calls.length - 1].patch.note,
+  huge,
+  'carrying the note byte for byte (no trim, no cap)',
+)
+
+// Enter saves; Shift+Enter must keep making lines.
+const reopen = () => {
+  findByClass(rowFor('带备注的'), 'dshtb-notebtn')[0].props.onClick({ preventDefault() {}, stopPropagation() {} })
+  return render()
+}
+tree = reopen()
+findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.onChange({ target: { value: '换行写\n第二行' } })
+tree = render()
+const beforeShift = calls.length
+findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.onKeyDown({
+  key: 'Enter',
+  shiftKey: true,
+  preventDefault() {},
+})
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(calls.length, beforeShift, 'Shift+Enter makes a newline instead of saving')
+assert.equal(
+  findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.value,
+  '换行写\n第二行',
+  'and the text is still there to keep editing',
+)
+
+findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.onKeyDown({ key: 'Enter', preventDefault() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(calls[calls.length - 1].patch.note, '换行写\n第二行', 'plain Enter saves the note')
+
+// Escape abandons the edit: nothing is sent and the preview comes back as it was.
+tree = reopen()
+findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.onChange({ target: { value: '不要保存这段' } })
+tree = render()
+const beforeEsc = calls.length
+findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.onKeyDown({ key: 'Escape', preventDefault() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(calls.length, beforeEsc, 'Escape sends nothing')
+assert.equal(findByClass(rowFor('带备注的'), 'dshtb-notearea').length, 0, 'and closes the editor')
+assert.equal(textOf(findByClass(rowFor('带备注的'), 'dshtb-note')[0]), LONG_NOTE, 'leaving the note untouched')
+
+// Clearing is an edit like any other: an empty textarea saves an empty note.
+tree = reopen()
+findByClass(rowFor('带备注的'), 'dshtb-notearea')[0].props.onChange({ target: { value: '' } })
+tree = render()
+findByClass(rowFor('带备注的'), 'dshtb-notesave')[0].props.onClick({ preventDefault() {}, stopPropagation() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(calls[calls.length - 1].patch.note, '', 'an empty note is saved as an empty note')
+
+// A note can be added to a row that has none, from the same control.
+tree = render()
+findByClass(rowFor('空白备注的'), 'dshtb-notebtn')[0].props.onClick({ preventDefault() {}, stopPropagation() {} })
+tree = render()
+assert.equal(
+  findByClass(rowFor('空白备注的'), 'dshtb-notearea')[0].props.value,
+  '',
+  'the same control opens an empty editor for a row that has no note',
+)
+console.log('note    OK')
 
 console.log('\nall browser-half smoke checks passed')

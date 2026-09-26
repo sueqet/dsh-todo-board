@@ -2,7 +2,7 @@
 
 **A cross-session TODO board for DeepSeek Harness — hand the agent one task at a time, and it picks up the next one by itself.**
 
-**DeepSeek Harness（DSH）的跨会话 TODO 板 —— 一次只派一件事，干完它自己去拿下一件。** 面板标题栏的 `⚙` 里还带一个不打扰人的开发者日志（出错才亮小圆点）。
+**DeepSeek Harness（DSH）的跨会话 TODO 板 —— 一次只派一件事，干完它自己去拿下一件。** 验收过的行会移入独立的「已完成」列表，每条待办还能带一段**备注**（派发时一并发给模型，面板里直接看、直接改）。标题栏的 `⚙` 里还带一个不打扰人的开发者日志（出错才亮小圆点）。
 
 [![topic: dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-4f6ef7)](https://github.com/topics/dsh-plugin)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -172,17 +172,21 @@ Only the right-hand box closes a task. The prompt section explicitly forbids the
 
 - **折叠为一行**：标题栏右侧的 `–` 把整板收成一行 —— `TODO · 未完成数 · 下一条待办 · 待验 N`，点这一行任意位置展开。平时挂着不占地方，扫一眼就知道还剩什么。
 - **切换界面**：标题栏的 `▤` 在三套界面之间循环：**票据**（默认，现在的样子）→ **素白** → **紧凑**。按钮上的字形就是当前那套，悬停会说明它改了什么。选择记在 `localStorage`（`dsh.todoBoard.skin.v1`），刷新后保持；已折成一行时也一样生效。切换按钮就在标题栏，不用进设置页。
-- **区块折叠**：面板内部三个区块（新增待办 / 待办列表 / 面板）各自可折叠，点区块标题切换，`▾` 展开、`▸` 已折叠。只留列表时最省空间；折叠状态记在 `localStorage`，刷新后保持。
+- **区块折叠**：面板内部四个区块（新增待办 / 待办列表 / 已完成 / 面板）各自可折叠，点区块标题切换，`▾` 展开、`▸` 已折叠。只留列表时最省空间；折叠状态记在 `localStorage`，刷新后保持。
 - **拖动 / 缩放**：拖标题栏移动，右下角 `◢` 缩放；位置与尺寸存进 `localStorage`，刷新保留；双击标题栏或拖柄还原。**窗口变窄时面板会自动收回视野内**（含浏览器缩放），所以它不会被裁到屏幕外；窗口再拉宽时回到你放它的地方。就算位置是被更大的显示器存歪的，刷新一次即可恢复，不必手清 `localStorage`。
 - **筛选**：当前目录 / 当前会话 / 全部，每段带未完成计数。
+- **已完成列表**：勾上某行右边的**圆勾（已验收）**，这一行就从「待办列表」移走、进入「已完成」区块 —— 不是变灰留在原地，是真的换了一个列表。新区块在待办列表和面板之间，**最近验收的排在最上面**（所以你刚勾的那条就在眼前），按目录分组，同样可折叠。再点一次那个圆勾就撤销验收，行会回到待办列表。已完成的行不参与执行顺序：没有拖柄、也不能被拖成落点（`▶` 与 ✕ 仍然可用）。底部「清理已验收 N」清空的就是这个列表。
 - **行内编辑**：双击标题改名；点模式标签在 提醒 → 续跑 → 新会话 之间循环切换；点定时标签改时间（未定时的行显示 `🕓 不定时`，点它即可加上）。
+- **备注（note）**：有备注的行会在标题下方显示备注正文（最多 2 行，紧凑界面 1 行，鼠标悬停可看全文）。行尾的「＋ 备注 / ✎ 备注」是它**自己的**控件：点开是一个独立的多行文本框，`Enter` 保存、`Shift+Enter` 换行、`Esc` 取消，或点「保存 / 取消」。备注**不裁剪、不设长度上限**（写多少就存多少），因为它是派发时一起发给模型的上下文 —— 面板必须让你在派发前看到它。
 - **多行输入**：新增框自动增高（3 行起步，最高 180px），`Enter` 添加、`Shift+Enter` 换行、`Ctrl+V` 粘贴截图附图。
 - **开发者日志**：标题栏的 `⚙` 在同一个浮窗内切到日志页。平时用不到；出错时按钮上亮一个小圆点，点开看完即清。详见下面「开发者日志」一节。
 - **Cordis 入口**：侧边栏底部的 `Cordis Plugin` 按钮折起，入口移到本面板底部；点它打开原面板，面板出现在**本面板正下方**（右对齐、互不覆盖），拖动或缩放本面板时它会跟着走。找不到入口时按钮会变灰并给出提示。
 
 - **Park as one line**: the `–` in the title bar collapses the whole board to a single line — `TODO · open count · next task · 待验 N`. Click anywhere on that line (or press `Enter`/`Space`) to unfold; the line hugs its content instead of spanning the panel. It stays out of the way until you need it.
 - **Switch the look**: the `▤` in the title bar cycles three skins — **票据** (default, as shipped) → **素白** (plain) → **紧凑** (dense). The button's glyph *is* the current skin and its tooltip says what that skin changes. The choice persists in `localStorage` (`dsh.todoBoard.skin.v1`) and applies to the parked one-line view too — no trip to a settings page.
-- **Section folding**: the composer, the list, and the footer each fold away from their own header (`▾` open, `▸` folded); with only the list left the panel is at its smallest. The folded set is kept in `localStorage` across reloads.
+- **Section folding**: the composer, the open list, the completed list and the footer each fold away from their own header (`▾` open, `▸` folded); with only one list left the panel is at its smallest. The folded set is kept in `localStorage` across reloads.
+- **The 已完成 list**: ticking a row's round box (**已验收**) moves it out of 待办列表 and into the 已完成 section that sits between the list and the panel footer — a move, not a dimmed copy left behind. Newest first, grouped by directory, foldable like the others; un-ticking the same box sends it back. Completed rows are out of the queue: no drag handle, no drop target (`▶` and ✕ still work). The footer's "清理已验收 N" empties exactly this list.
+- **Note**: a row with a note shows it under the title, clamped to two lines (one in the dense skin, full text on hover). "＋ 备注 / ✎ 备注" is the note's **own** control: it opens a separate multi-line textarea — `Enter` saves, `Shift+Enter` adds a line, `Esc` cancels, or use its own 保存 / 取消. The note is never trimmed and never capped, because it is the context dispatched to the model: the panel has to let you read it before you dispatch.
 - **Developer log**: the `⚙` in the title bar swaps the panel to a log page in the same window. You will rarely need it; when something breaks, a small dot appears on the button, and opening the page clears it. See "开发者日志 / Developer log" below.
 - **Drag / resize**: drag the title bar to move, the `◢` corner to resize. Position and size persist in `localStorage`; double-click the title bar (or the grip) to reset. **A narrower window pulls the panel back into view automatically** (browser zoom included), so it can never be cropped off-screen, and widening returns it to where you put it. A layout stranded by a bigger monitor is recovered by a plain reload — no `localStorage` surgery.
 

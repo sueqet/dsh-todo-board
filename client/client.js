@@ -94,7 +94,7 @@ const SKINS = [
 ]
 
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.9.1'
+const BUILD = '0.10.0'
 
 /**
  * Severity filters in the log view, most severe first.
@@ -221,9 +221,9 @@ const CSS = `
 .dshtb-lightcap{font:600 11px/1.4 ${MONO};color:#fff;opacity:.85}
 .dshtb-dir input::placeholder{color:var(--tb-dim);opacity:.85}
 .dshtb-dir input:focus{border-style:solid;border-color:var(--tb-accent);color:var(--tb-ink)}
-.dshtb-list{overflow:auto;padding:2px 0 6px;scrollbar-width:thin}
-.dshtb-list::-webkit-scrollbar{width:9px}
-.dshtb-list::-webkit-scrollbar-thumb{background:var(--tb-line2);border-radius:5px;
+.dshtb-list,.dshtb-donelist{overflow:auto;padding:2px 0 6px;scrollbar-width:thin}
+.dshtb-list::-webkit-scrollbar,.dshtb-donelist::-webkit-scrollbar{width:9px}
+.dshtb-list::-webkit-scrollbar-thumb,.dshtb-donelist::-webkit-scrollbar-thumb{background:var(--tb-line2);border-radius:5px;
   border:3px solid transparent;background-clip:content-box}
 .dshtb-group{display:flex;align-items:center;gap:7px;padding:10px 12px 4px;
   font:600 10.5px/1 ${MONO};letter-spacing:.09em;text-transform:uppercase;color:var(--tb-dim)}
@@ -265,6 +265,30 @@ const CSS = `
   background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);font:inherit;font-size:13px;
   line-height:1.45;outline:none;box-shadow:0 0 0 3px rgba(128,128,128,.16)}
 .dshtb-edit::placeholder{color:var(--tb-dim)}
+/* The note: plain text, never a control, so it must not look like one — no
+   border, no background, no pointer cursor. It sits directly under the title and
+   is clamped to two lines (one in the dense skin); the clamp is visual only, the
+   whole string stays in the DOM, so selecting a row still copies every character.
+   overflow-wrap:anywhere is load-bearing: notes are pasted paths and logs, and a
+   long unbroken token would otherwise widen the panel instead of wrapping. */
+.dshtb-note{margin-top:3px;font-size:11.5px;line-height:1.45;color:var(--tb-dim);
+  white-space:pre-wrap;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+/* The note editor is its own control (never folded into the title editor): a
+   note is multi-line text, and the title editor's single-line commit rules would
+   cut it in half. */
+.dshtb-noteedit{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.dshtb-notearea{flex:1 0 100%;width:100%;min-height:54px;max-height:220px;resize:vertical;
+  padding:6px 8px;border-radius:7px;border:1px solid var(--tb-accent);
+  background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);font:inherit;font-size:12.5px;
+  line-height:1.45;outline:none;box-shadow:0 0 0 3px rgba(128,128,128,.16)}
+.dshtb-notearea::placeholder{color:var(--tb-dim)}
+.dshtb-notesave,.dshtb-notecancel{padding:2px 9px;border:1px solid var(--tb-line);border-radius:6px;
+  background:transparent;color:var(--tb-dim);font:inherit;font-size:11.5px;cursor:pointer;
+  transition:border-color .12s,color .12s}
+.dshtb-notesave{color:var(--tb-accent);border-color:var(--tb-accent)}
+.dshtb-notesave:hover{border-color:var(--tb-accent);color:var(--tb-ink)}
+.dshtb-notecancel:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px;
   font:400 12px/1.5 ${MONO};color:var(--tb-dim)}
 .dshtb-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:6px;
@@ -299,6 +323,8 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-empty{padding:24px 16px;text-align:center;color:var(--tb-dim)}
 .dshtb-empty b{display:block;font:700 24px/1 ${MONO};opacity:.3;margin-bottom:9px}
 .dshtb-empty span{font-size:11px;opacity:.9}
+/* One short line, not an empty box: an empty section should cost nothing. */
+.dshtb-doneempty{padding:6px 12px 8px;font-size:11.5px;color:var(--tb-dim);opacity:.85}
 .dshtb-foot{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:8px 12px;
   border-top:1px solid var(--tb-line);
   font:600 11px/1 ${MONO};font-variant-numeric:tabular-nums;color:var(--tb-dim)}
@@ -427,7 +453,8 @@ const CSS_PLAIN = `
   background:var(--dsw-alias-bg-layer-2)}
 .dshtb-root[data-dshtb-skin="plain"] .dshtb-dir input:focus,
 .dshtb-root[data-dshtb-skin="plain"] .dshtb-when input:focus{border-color:var(--tb-line2)}
-.dshtb-root[data-dshtb-skin="plain"] .dshtb-list{padding:0 0 8px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-list,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-donelist{padding:0 0 8px}
 /* The group heading is the directory a row belongs to, so it stays readable —
    it just loses its rule and its uppercase tracking. Keeping the text at a
    small size rather than at zero is deliberate: a zero font size here would
@@ -490,6 +517,10 @@ const CSS_DENSE = `
 .dshtb-root[data-dshtb-skin="dense"] .dshtb-group{padding:7px 10px 3px}
 .dshtb-root[data-dshtb-skin="dense"] .dshtb-t{font-size:12.5px;line-height:1.4}
 .dshtb-root[data-dshtb-skin="dense"] .dshtb-facts{font-size:10.5px;margin-top:2px}
+/* One line, not two: the dense skin exists to fit more rows on one screen. */
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-note{-webkit-line-clamp:1;font-size:11px;margin-top:2px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-notearea{font-size:12px;min-height:46px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-doneempty{padding:4px 10px 6px;font-size:11px}
 .dshtb-root[data-dshtb-skin="dense"] .dshtb-meta{gap:4px;margin-top:3px}
 .dshtb-root[data-dshtb-skin="dense"] .dshtb-chip{padding:1px 6px;font-size:11.5px}
 .dshtb-root[data-dshtb-skin="dense"] .dshtb-cb{width:15px;height:15px;font-size:10px}
@@ -859,10 +890,10 @@ function saveLayout(layout) {
  * composer is something you do once, not once per page load.
  */
 const SECTIONS_KEY = 'dsh.todoBoard.sections.v1'
-const SECTION_IDS = ['compose', 'list', 'panel']
+const SECTION_IDS = ['compose', 'list', 'done', 'panel']
 
 function loadSections() {
-  const state = { compose: true, list: true, panel: true }
+  const state = { compose: true, list: true, done: true, panel: true }
   try {
     const raw = window.localStorage.getItem(SECTIONS_KEY)
     if (raw === null) return state
@@ -993,6 +1024,8 @@ function TodoBoard(props) {
   const [dirInput, setDirInput] = React.useState('')
   const [when, setWhen] = React.useState('')
   const [pending, setPending] = React.useState([])
+  const [noteId, setNoteId] = React.useState('')
+  const [noteDraft, setNoteDraft] = React.useState('')
   const [viewing, setViewing] = React.useState(null)
   const [filter, setFilter] = React.useState('dir')
   const [busy, setBusy] = React.useState(false)
@@ -1320,22 +1353,40 @@ function TodoBoard(props) {
   const byDir = todos.filter((t) => t.dir === cwdKey)
   const bySession = todos.filter((t) => t.sourceSessionId === currentId)
   const scope = filter === 'dir' ? byDir : filter === 'session' ? bySession : todos
-  const visible = scope.slice().sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+  // The open list and the completed list are two halves of one scope: a row is in
+  // exactly one of them, which is what makes ticking the round box a MOVE rather
+  // than a copy. Only the open half is draggable, and `dropOn` reads exactly this
+  // array — so a finished row can never be dragged into the queue's order.
+  const visible = scope
+    .filter((t) => !t.verified)
+    .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+  // Newest first: the row you just ticked has to land at the top of the section
+  // you are looking at, otherwise the move is invisible and looks like a deletion.
+  const completed = scope
+    .filter((t) => t.verified)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0) || b.order - a.order)
 
   const awaitingVerify = todos.filter((t) => t.aiDone && !t.verified).length
   const verifiedCount = todos.filter((t) => t.verified).length
   const openCount = todos.filter((t) => !t.verified).length
 
-  const groups = []
-  const index = {}
-  for (const todo of visible) {
-    const key = todo.dirLabel || '(未指定目录)'
-    if (index[key] === undefined) {
-      index[key] = groups.length
-      groups.push({ key, items: [] })
+  /** Group rows by directory, preserving the order they arrive in. */
+  function dirGroups(list) {
+    const out = []
+    const index = {}
+    for (const todo of list) {
+      const key = todo.dirLabel || '(未指定目录)'
+      if (index[key] === undefined) {
+        index[key] = out.length
+        out.push({ key, items: [] })
+      }
+      out[index[key]].items.push(todo)
     }
-    groups[index[key]].items.push(todo)
+    return out
   }
+
+  const groups = dirGroups(visible)
+  const doneGroups = dirGroups(completed)
 
   // ------------------------------------------------------------ log view data
 
@@ -1635,6 +1686,30 @@ function TodoBoard(props) {
     patch(id, { title: text })
   }
 
+  function beginNote(todo) {
+    setNoteId(todo.id)
+    setNoteDraft(typeof todo.note === 'string' ? todo.note : '')
+  }
+
+  function cancelNote() {
+    setNoteId('')
+    setNoteDraft('')
+  }
+
+  /**
+   * Save the note exactly as typed.
+   *
+   * Not trimmed, not capped. The note is the context the model reads before it
+   * starts, and it is free text: a character this function silently dropped
+   * would be a lie in the one place the panel has to be a faithful view of the
+   * board. If a limit is ever wanted it belongs in the host, as a refusal.
+   */
+  function commitNote(id) {
+    const text = noteDraft
+    cancelNote()
+    patch(id, { note: text })
+  }
+
   function dropOn(targetId) {
     const from = dragId
     setDragId('')
@@ -1650,7 +1725,15 @@ function TodoBoard(props) {
     call('reorder', { ids })
   }
 
-  function item(todo, rowIndex) {
+  /**
+   * One row of either list.
+   *
+   * @param completed - true inside the 已完成 section. A finished row is no
+   *   longer part of the queue: it carries no drag handle and no drop target,
+   *   because `dropOn` reorders the OPEN list and the row no longer sits in it.
+   */
+  function item(todo, rowIndex, completed) {
+    const finished = completed === true
     let cls = 'dshtb-item'
     if (todo.verified) cls += ' done'
     if (dragId === todo.id) cls += ' dragging'
@@ -1663,6 +1746,10 @@ function TodoBoard(props) {
     // stamp, so the button degrades instead of locking every row.
     const state = typeof todo.state === 'string' ? todo.state : (todo.dispatchedAt > 0 ? 'dispatched' : 'pending')
     const runnable = state === 'pending'
+
+    // Read once, here, because both the chip row and the body use it. The note is
+    // plain text: it is never trimmed, never capped, and never parsed.
+    const noteText = typeof todo.note === 'string' ? todo.note : ''
 
     // The directory is NOT a chip: the facts line under the title already names
     // it in full, and the chip only repeated the basename. The schedule is the
@@ -1802,6 +1889,25 @@ function TodoBoard(props) {
         ),
       )
     }
+    // The note's own control, and the only one: `dshtb-chip` gives it the panel's
+    // shared chip geometry (what the mode / schedule chips wear), while
+    // `dshtb-notebtn` is the unique hook — a test looking for the note control can
+    // never land on a mode chip or a time chip by accident.
+    meta.push(
+      h(
+        'button',
+        {
+          className: 'dshtb-chip dshtb-notebtn',
+          key: 'n',
+          title:
+            noteText === ''
+              ? '给这条待办加备注：写给模型的上下文，派发时会一起发过去'
+              : '编辑备注（当前 ' + noteText.length + ' 字）',
+          onClick: () => beginNote(todo),
+        },
+        noteText === '' ? '\uFF0B 备注' : '\u270E 备注',
+      ),
+    )
     if (todo.sourceSessionTitle) {
       meta.push(h('span', { className: 'dshtb-chip', key: 't' }, todo.sourceSessionTitle))
     }
@@ -1835,6 +1941,43 @@ function TodoBoard(props) {
     const titleNode = editNode === null
       ? h('div', { className: 'dshtb-t', title: '双击编辑', onDoubleClick: () => beginEdit(todo) }, todo.title)
       : editNode
+
+    // The note lives under the title as plain text — never a control, and never
+    // inside the single-line title editor, which would cut a multi-line note in
+    // half. While it is being edited the preview gives way to its own textarea;
+    // `title` carries the full text so a clamped note is still readable on hover.
+    const noteNode =
+      noteId === todo.id
+        ? h(
+            'div',
+            { className: 'dshtb-noteedit' },
+            h('textarea', {
+              className: 'dshtb-notearea',
+              autoFocus: true,
+              rows: 3,
+              placeholder: '备注：写给这条待办的上下文（派发时会和标题一起发给模型）',
+              value: noteDraft,
+              onChange: (e) => setNoteDraft(e.target.value),
+              onKeyDown: (e) => {
+                // Enter saves, Shift+Enter makes a line: a note is multi-line, so
+                // the newline key has to be the one that keeps typing.
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  commitNote(todo.id)
+                }
+                if (e.key === 'Escape') cancelNote()
+              },
+            }),
+            h(
+              'button',
+              { className: 'dshtb-notesave', title: '保存备注（Enter）', onClick: () => commitNote(todo.id) },
+              '保存',
+            ),
+            h('button', { className: 'dshtb-notecancel', title: '取消（Esc）', onClick: cancelNote }, '取消'),
+          )
+        : noteText === ''
+          ? null
+          : h('div', { className: 'dshtb-note', title: '备注：\n' + noteText }, noteText)
 
     // A plain monospace readout under the title: the directory in full, which a
     // long path would otherwise bury in a narrow panel, plus the bound session.
@@ -1885,38 +2028,49 @@ function TodoBoard(props) {
             ),
           )
 
+    // A finished row belongs to no queue, so it is neither draggable nor a drop
+    // target: `dropOn` reorders the OPEN list, and this row is not in it any more.
+    const dragProps = finished
+      ? {}
+      : {
+          onDragStart: (e) => {
+            setDragId(todo.id)
+            if (e.dataTransfer) {
+              e.dataTransfer.effectAllowed = 'move'
+              e.dataTransfer.setData('text/plain', todo.id)
+            }
+          },
+          onDragOver: (e) => {
+            e.preventDefault()
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+            if (overId !== todo.id) setOverId(todo.id)
+          },
+          onDragLeave: () => {
+            if (overId === todo.id) setOverId('')
+          },
+          onDrop: (e) => {
+            e.preventDefault()
+            dropOn(todo.id)
+          },
+          onDragEnd: () => {
+            setDragId('')
+            setOverId('')
+          },
+        }
+
     return h(
       'div',
       {
         className: cls,
         key: todo.id,
         style: { animationDelay: Math.min(rowIndex, 12) * 18 + 'ms' },
-        draggable: editId !== todo.id,
-        onDragStart: (e) => {
-          setDragId(todo.id)
-          if (e.dataTransfer) {
-            e.dataTransfer.effectAllowed = 'move'
-            e.dataTransfer.setData('text/plain', todo.id)
-          }
-        },
-        onDragOver: (e) => {
-          e.preventDefault()
-          if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-          if (overId !== todo.id) setOverId(todo.id)
-        },
-        onDragLeave: () => {
-          if (overId === todo.id) setOverId('')
-        },
-        onDrop: (e) => {
-          e.preventDefault()
-          dropOn(todo.id)
-        },
-        onDragEnd: () => {
-          setDragId('')
-          setOverId('')
-        },
+        draggable: finished ? false : editId !== todo.id,
+        ...dragProps,
       },
-      h('span', { className: 'dshtb-grip', title: '拖动调整执行顺序' }, '\u283F'),
+      // No handle on a finished row: an inert grip would still read as "drag me".
+      // The row simply starts a little further left, which is what "not in the
+      // queue any more" looks like.
+      finished ? null : h('span', { className: 'dshtb-grip', title: '拖动调整执行顺序' }, '\u283F'),
       h(
         'div',
         { className: 'dshtb-checks' },
@@ -1941,7 +2095,15 @@ function TodoBoard(props) {
           todo.verified ? '\u2713' : '',
         ),
       ),
-      h('div', { className: 'dshtb-body' }, titleNode, detailNode, imagesNode, h('div', { className: 'dshtb-meta' }, meta)),
+      h(
+        'div',
+        { className: 'dshtb-body' },
+        titleNode,
+        noteNode,
+        detailNode,
+        imagesNode,
+        h('div', { className: 'dshtb-meta' }, meta),
+      ),
       h(
         'div',
         { className: 'dshtb-acts' },
@@ -2391,10 +2553,46 @@ function TodoBoard(props) {
                     h(
                       'span',
                       null,
-                      filter === 'dir' ? '当前目录还没有待办' : '这里还没有待办',
+                      completed.length > 0
+                        ? '未完成的都清空了（已完成的在下面）'
+                        : filter === 'dir'
+                          ? '当前目录还没有待办'
+                          : '这里还没有待办',
                     ),
                   )
                 : h('div', { className: 'dshtb-list', key: 'list-body' }, rows),
+          })),
+      // The other half of the list, between the queue and the panel footer. It is
+      // a separate section rather than a filter on the list: ticking the round box
+      // has to LOOK like the row left the queue, and a filter would silently keep
+      // finished rows one click away from the work you are doing.
+      ...(logOpen
+        ? []
+        : foldable({
+            id: 'done',
+            name: '已完成',
+            note: completed.length,
+            open: sections.done,
+            onToggle: toggleSection,
+            body:
+              doneGroups.length === 0
+                ? h(
+                    'div',
+                    { className: 'dshtb-doneempty', key: 'done-body' },
+                    '还没有已验收的待办。勾上每行右边的圆勾，条目就会移到这里。',
+                  )
+                : h(
+                    'div',
+                    { className: 'dshtb-donelist', key: 'done-body' },
+                    doneGroups.map((group) =>
+                      h(
+                        'div',
+                        { key: 'done-' + group.key },
+                        h('div', { className: 'dshtb-group' }, group.key),
+                        group.items.map((todo) => item(todo, 0, true)),
+                      ),
+                    ),
+                  ),
           })),
       err !== '' ? h('div', { className: 'dshtb-err' }, err) : null,
       data !== null && data !== undefined && data.storageError

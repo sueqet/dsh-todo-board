@@ -28,6 +28,9 @@
  *  23. every log level can be switched off (empty reads as "nothing logged")
  *  24. the log poll reads `logOpen` from a stale closure (the open view freezes)
  *  25. a refused poll reports a bare status code (nothing to act on)
+ *  26. a note is not rendered (the context the model gets stays invisible)
+ *  27. saving a note sends no patch (the edit is a no-op)
+ *  28. a verified row stays in the open list (it never moves to 已完成)
  *
  * Patterns are matched against a normalized (LF) copy because the working tree
  * is checked out with CRLF on Windows, then the replacement is mapped back onto
@@ -219,6 +222,23 @@ const mutants = [
       '  }\n' +
       "  return 'HTTP ' + status",
     to: "  return 'HTTP ' + status",
+  },
+  {
+    // The note is the context a dispatched session is handed, so not rendering it
+    // means the user approves work without seeing what the model was told.
+    name: 'a note is not rendered (the context the model gets stays invisible)',
+    from: "    const noteText = typeof todo.note === 'string' ? todo.note : ''",
+    to: "    const noteText = ''",
+  },
+  {
+    name: 'saving a note sends no patch (the edit is a no-op)',
+    from: '    patch(id, { note: text })',
+    to: '    void text',
+  },
+  {
+    name: 'a verified row stays in the open list (it never moves to 已完成)',
+    from: '  const visible = scope\n    .filter((t) => !t.verified)',
+    to: '  const visible = scope\n    .filter(() => true)',
   },
 ]
 
