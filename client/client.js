@@ -73,8 +73,42 @@ const LOST_CHIP = {
   agents: { label: '服务不可用', hint: 'agents 服务不可用；恢复后会按退避自动重试。' },
 }
 const MONO = 'ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace'
+
+/**
+ * The three looks the panel can wear, in cycle order.
+ *
+ * `ticket` is the default and is deliberately NOT described by a block further
+ * down: it *is* the base stylesheet, which stays unscoped, and each skin block
+ * then states only what it changes. One description of the default look rather
+ * than two that can drift apart.
+ *
+ * A skin is presentation only — it may move padding, borders, type and density,
+ * but never which control exists, what a control means, or what goes on the
+ * wire. The square 「AI 已完成」 box versus the round 「已验收」 box is meaning
+ * rather than decoration, so it stays square-and-round in all three.
+ */
+const SKINS = [
+  { id: 'ticket', name: '票据', glyph: '\u25A4', hint: '细线分隔、等宽数字、状态标签带框（默认）' },
+  { id: 'plain', name: '素白', glyph: '\u25FB', hint: '去掉边框与分隔线，留白更多；状态收成一个色点' },
+  { id: 'dense', name: '紧凑', glyph: '\u2263', hint: '同样极简，字号行距各降一档，一屏能看更多条' },
+]
+
 /** Bumped whenever the browser half changes, so the footer proves which build is live. */
-const BUILD = '0.6.1'
+const BUILD = '0.9.1'
+
+/**
+ * Severity filters in the log view, most severe first.
+ *
+ * `error` is the default because that is what the dot on the log button means:
+ * opening the view to see why the dot lit should not first require narrowing a
+ * list. `debug` is only ever present when the host captured it, and the host
+ * keeps it in memory only — so a reader who sees debug lines is looking at
+ * something that will not survive a restart, which the view says out loud.
+ */
+const LOG_LEVELS = ['error', 'warn', 'info', 'debug']
+const LOG_SOURCE_KEY = 'dsh.todoBoard.logSource.v1'
+/** Log lines the panel keeps client-side, so scrolling back costs no requests. */
+const LOG_KEEP = 400
 
 const CSS = `
 .dshtb-root{position:fixed;top:56px;right:16px;z-index:2147482000;pointer-events:auto;
@@ -105,11 +139,21 @@ const CSS = `
 .dshtb-stats i{font-style:normal;display:inline-flex;align-items:center;gap:4px}
 .dshtb-stats i::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.75}
 .dshtb-sp{flex:1}
-.dshtb-fold{width:26px;height:26px;border:1px solid transparent;border-radius:7px;background:transparent;
-  color:var(--tb-dim);cursor:pointer;font:600 14px/1 ${MONO};padding:0;display:grid;place-items:center;
-  transition:background .12s,color .12s,border-color .12s}
-.dshtb-fold:hover{background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);border-color:var(--tb-line2)}
-.dshtb-fold:focus-visible{outline:2px solid var(--tb-accent);outline-offset:1px}
+/* Two title-bar controls, one geometry: the fold control and the skin control.
+   They stay separate classes because they are separate controls — the fold
+   parks the panel, the skin changes how it looks — and nothing should be able
+   to find one while looking for the other. */
+/* Three title-bar controls, one geometry: the fold control, the skin control
+   and the log control. They stay separate classes because they are separate
+   controls — the fold parks the panel, the skin changes how it looks, the log
+   swaps the page — and nothing should be able to find one while looking for
+   another. Only the shared geometry lives in this rule. */
+.dshtb-fold,.dshtb-skin,.dshtb-log{width:26px;height:26px;border:1px solid transparent;border-radius:7px;
+  background:transparent;color:var(--tb-dim);cursor:pointer;font:600 14px/1 ${MONO};padding:0;
+  display:grid;place-items:center;transition:background .12s,color .12s,border-color .12s}
+.dshtb-fold:hover,.dshtb-skin:hover,.dshtb-log:hover{background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);
+  border-color:var(--tb-line2)}
+.dshtb-fold:focus-visible,.dshtb-skin:focus-visible,.dshtb-log:focus-visible{outline:2px solid var(--tb-accent);outline-offset:1px}
 /* Section label doubling as the fold/unfold control for what follows it. */
 .dshtb-sect{display:flex;align-items:center;gap:6px;width:100%;padding:9px 12px 5px;
   border:0;background:transparent;cursor:pointer;user-select:none;text-align:left;
@@ -153,9 +197,9 @@ const CSS = `
   background:transparent;color:var(--tb-dim);font:inherit;font-size:12px;outline:none;
   transition:border-color .12s,color .12s;color-scheme:dark light}
 .dshtb-when input:focus{border-style:solid;border-color:var(--tb-accent);color:var(--tb-ink)}
+/* The attachment area holds a hint and the pending thumbnails — no picker
+   control, so no label styling belongs here any more. */
 .dshtb-attach{display:flex;flex-direction:column;gap:6px}
-.dshtb-attach label{cursor:pointer;display:inline-flex;align-items:center;gap:4px;align-self:flex-start}
-.dshtb-attach label.off{opacity:.5;cursor:not-allowed}
 .dshtb-thumbs{display:flex;flex-wrap:wrap;gap:6px}
 .dshtb-thumb{position:relative;width:52px;height:52px;padding:0;border:1px solid var(--tb-line);
   border-radius:8px;background:transparent;cursor:pointer;overflow:hidden}
@@ -284,7 +328,185 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
 .dshtb-badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--tb-accent);
   color:#fff;font:700 10px/1 ${MONO};font-variant-numeric:tabular-nums;display:inline-grid;place-items:center}
 .dshtb-badge.warn{background:var(--tb-warn)}
+/* The log button and its "something went wrong" dot. The dot rides the button
+   instead of a separate node so it cannot drift away from the control it
+   annotates, and it is absolutely positioned so lighting it never reflows the
+   title bar. */
+.dshtb-log{position:relative}
+.dshtb-log.on{background:var(--dsw-alias-bg-layer-1);color:var(--tb-ink);border-color:var(--tb-line2)}
+.dshtb-dot{position:absolute;top:2px;right:2px;width:6px;height:6px;border-radius:50%;
+  background:var(--tb-warn);box-shadow:0 0 0 1.5px var(--tb-bg)}
+/* Developer view: monospace, dense, unabashedly plain. This is not a surface to
+   make pretty — it is a surface to read a stack trace on. */
+.dshtb-logview{display:flex;flex-direction:column;min-height:0;flex:1}
+.dshtb-logbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:8px 12px;
+  border-bottom:1px solid var(--tb-line)}
+.dshtb-logbar button{padding:3px 8px;border-radius:7px;border:1px solid var(--tb-line);
+  background:transparent;color:var(--tb-dim);font:600 10.5px/1.4 ${MONO};cursor:pointer;
+  transition:background .12s,color .12s,border-color .12s}
+.dshtb-logbar button:hover{color:var(--tb-ink);border-color:var(--tb-line2)}
+.dshtb-logbar button.on{background:var(--tb-accent);border-color:var(--tb-accent);color:#fff}
+/* The source toggle is its own class rather than a reuse of the title-bar log
+   button: same reason the three title-bar controls are separate — a class is
+   how something finds exactly one control. */
+.dshtb-logsrc{min-width:56px}
+.dshtb-logfilter{flex:1;min-width:90px;padding:3px 8px;border-radius:7px;border:1px solid var(--tb-line);
+  background:transparent;color:var(--tb-ink);font:400 11px/1.4 ${MONO};outline:none}
+.dshtb-logfilter:focus{border-color:var(--tb-accent)}
+.dshtb-logmeta{padding:5px 12px;border-bottom:1px solid var(--tb-line);
+  font:400 10px/1.5 ${MONO};color:var(--tb-dim);word-break:break-all}
+.dshtb-logmeta b{color:var(--tb-warn);font-weight:700}
+.dshtb-loglist{flex:1;min-height:0;overflow:auto;padding:2px 0}
+.dshtb-logrow{display:flex;gap:8px;padding:4px 12px;border-bottom:1px solid var(--tb-line);
+  font:400 10.5px/1.5 ${MONO};align-items:flex-start}
+.dshtb-logrow:hover{background:var(--dsw-alias-bg-layer-1)}
+.dshtb-logrow .at{flex:0 0 auto;opacity:.6;font-variant-numeric:tabular-nums}
+.dshtb-logrow .lv{flex:0 0 auto;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.dshtb-logrow.error .lv{color:var(--dsw-alias-state-error-primary)}
+.dshtb-logrow.warn .lv{color:var(--tb-warn)}
+.dshtb-logrow.info .lv{color:var(--tb-dim)}
+.dshtb-logrow.debug .lv{opacity:.65}
+.dshtb-logrow .body{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.dshtb-logrow .src{opacity:.6}
+.dshtb-logempty{padding:20px 12px;text-align:center;color:var(--tb-dim);font:400 11.5px/1.6 ${MONO}}
 `
+
+/**
+ * The two optional skins, each scoped by `[data-dshtb-skin]` on the panel root.
+ *
+ * They are additive on purpose: the base stylesheet above describes the default
+ * `ticket` look, so disabling a declaration here restores the shipped panel
+ * rather than an unstyled one. Everything is scoped under the root attribute,
+ * so no skin can reach a node outside this panel — the GUI around it is never
+ * affected by which skin is selected.
+ *
+ * `plain` is the information diet: no frames, no rules, no chips — a state
+ * becomes a coloured dot, and the schedule becomes the only chip left, because
+ * it is the one thing a row must stay able to change.
+ */
+const CSS_PLAIN = `
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-card{
+  border-color:transparent;box-shadow:0 22px 60px -20px rgba(0,0,0,.42);border-radius:16px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-head{border-bottom:0;padding:12px 14px 8px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-title{font-weight:600;letter-spacing:0}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-stats i::before{display:none}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-stats{gap:12px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-seg{
+  background:transparent;border:0;border-radius:0;padding:0 14px;margin:6px 0 2px;gap:16px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-seg button{
+  flex:0 0 auto;padding:3px 0;border-radius:0;border-bottom:1.5px solid transparent;
+  font-size:12.5px;color:var(--tb-dim)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-seg button:hover{color:var(--tb-ink)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-seg button.on{
+  background:transparent;box-shadow:none;color:var(--tb-ink);border-bottom-color:var(--tb-ink);
+  font-weight:600}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-seg em{font-size:10.5px;opacity:.5}
+/* The section label stays legible and keeps saying what it hides — it just
+   stops shouting. It is NOT hidden: the label is the only thing that says what
+   a folded section is, which is the whole reason it doubles as the control. */
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-sect{
+  letter-spacing:0;text-transform:none;padding:10px 14px 4px;gap:5px;
+  font:600 11.5px/1 ${MONO}}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-sect .car{font-size:10px;color:var(--tb-dim)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-sect::after{display:none}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-compose{border-bottom:0;padding:8px 14px 12px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-add textarea{
+  border-color:transparent;background:var(--dsw-alias-bg-layer-2);border-radius:12px;padding:10px 12px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-add textarea:focus{
+  border-color:var(--tb-line2);box-shadow:none}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-modes{
+  gap:0;padding:0;background:transparent;border:0;border-radius:0;align-self:flex-start}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-modes button{
+  flex:0 0 auto;border:0;border-bottom:1.5px solid transparent;border-radius:0;padding:4px 10px;
+  font-size:12.5px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-modes button:hover{border-bottom-color:var(--tb-line2)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-modes button.on{
+  border-bottom-color:var(--tb-accent);color:var(--tb-accent)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-dir input,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-when input{border-style:solid;border-color:transparent;
+  background:var(--dsw-alias-bg-layer-2)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-dir input:focus,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-when input:focus{border-color:var(--tb-line2)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-list{padding:0 0 8px}
+/* The group heading is the directory a row belongs to, so it stays readable —
+   it just loses its rule and its uppercase tracking. Keeping the text at a
+   small size rather than at zero is deliberate: a zero font size here would
+   erase the only on-screen statement of which directory you are looking at. */
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-group{
+  letter-spacing:0;text-transform:none;padding:12px 14px 2px;font:600 10.5px/1 ${MONO};
+  opacity:.85}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-group::after{display:none}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-item{padding:8px 14px;gap:9px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-item:hover{background:var(--dsw-alias-bg-layer-1)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-item::before{display:none}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-grip{opacity:.28}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-facts{font-size:10.5px;opacity:.8}
+/* A state stops being a bordered chip and becomes its own colour: a dot for the
+   quiet states, a tinted pill only where the row is actually asking for you. */
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip{
+  border:0;background:transparent;padding:0;gap:5px;font-size:11.5px;border-radius:0}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip::before{
+  content:'';width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.45;flex:0 0 auto}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.idle{opacity:.55}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.sent::before,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.ok::before{opacity:.9}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.run,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.bad{
+  padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-2)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.run::before,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.bad::before{opacity:1}
+/* The schedule keeps a real frame: it is the one chip that must still look
+   like something you can press. */
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.quiet,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.due{
+  border:1px solid var(--tb-line);border-radius:999px;padding:2px 8px;background:transparent}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.quiet::before,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.due::before,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-chip.x::before{display:none}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-whenchip{border-color:var(--tb-line);border-radius:999px}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-img,
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-thumb{border-color:transparent}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-foot{border-top:0}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-link{border-color:transparent}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-pill{
+  border-color:transparent;border-radius:12px;box-shadow:0 14px 34px -16px rgba(0,0,0,.5)}
+.dshtb-root[data-dshtb-skin="plain"] .dshtb-badge{background:var(--tb-ink);color:var(--tb-bg)}
+`
+
+/** `dense` keeps the ticket structure and removes its air. */
+const CSS_DENSE = `
+.dshtb-root[data-dshtb-skin="dense"]{font-size:12px;line-height:1.42}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-head{padding:7px 10px;gap:6px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-card{border-radius:10px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-stats{gap:7px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-fold{width:22px;height:22px;font-size:12px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-seg{margin:6px 9px 0;padding:1px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-seg button{padding:3px 5px;font-size:11.5px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-sect{padding:6px 10px 3px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-compose{padding:8px 10px;gap:6px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-add textarea{min-height:48px;padding:6px 8px;font-size:12.5px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-modes button{padding:4px 3px;font-size:11.5px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-item{padding:5px 10px;gap:6px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-group{padding:7px 10px 3px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-t{font-size:12.5px;line-height:1.4}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-facts{font-size:10.5px;margin-top:2px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-meta{gap:4px;margin-top:3px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-chip{padding:1px 6px;font-size:11.5px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-cb{width:15px;height:15px;font-size:10px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-checks{gap:4px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-img{width:46px;height:46px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-thumb{width:40px;height:40px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-ic{width:19px;height:19px;font-size:10px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-foot{padding:6px 10px;gap:5px 7px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-pill{padding:4px 8px;gap:6px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-badge{min-width:16px;height:16px;font-size:9.5px}
+.dshtb-root[data-dshtb-skin="dense"] .dshtb-empty{padding:16px 12px}
+`
+
+/** Skin id -> its block. `ticket` is absent: the base sheet is its definition. */
+const SKIN_CSS = { plain: CSS_PLAIN, dense: CSS_DENSE }
+
+const isSkin = (id) => SKINS.some((skin) => skin.id === id)
 
 // ---------------------------------------------------------------------------
 // Bridge to the shipped Cordis dynamic-plugin panel.
@@ -424,13 +646,42 @@ async function request(method, body) {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         })
-  if (!response.ok) throw new Error('HTTP ' + response.status)
+  if (!response.ok) throw new Error(failureText(response.status))
   return response.json()
+}
+
+/**
+ * Turn one refusal status into something the user can act on.
+ *
+ * 401 is the status v0.9.1 introduced: the board route now borrows the harness'
+ * own gate, which wants the browser-session cookie DSH issues when you open the
+ * URL `dsh web` prints. A bare "HTTP 401" would leave the panel looking broken
+ * with no hint, and this is the one failure whose fix is a single action.
+ */
+function failureText(status) {
+  if (status === 401) {
+    return 'HTTP 401 —— 浏览器没有 DSH 会话凭据。请用 `dsh web` 打印的那条带 token 的地址重开页面'
+  }
+  return 'HTTP ' + status
 }
 
 const transport = {
   snapshot: () => request('GET'),
   call: (method, args) => request('POST', Object.assign({ action: method }, args)),
+  /**
+   * Fetch log records newer than `since`.
+   *
+   * Only ever called while the log view is open — that is the whole reason the
+   * host gates log content behind a query flag, and it is what keeps the idle
+   * poll byte-for-byte what it was before this feature existed.
+   */
+  logs: (since) =>
+    fetch(ROUTE + '?logs=1&since=' + encodeURIComponent(String(since)), {
+      headers: { accept: 'application/json' },
+    }).then((response) => {
+      if (!response.ok) throw new Error(failureText(response.status))
+      return response.json()
+    }),
 }
 
 function describe(failure) {
@@ -443,6 +694,132 @@ function describe(failure) {
 /** Durable attachment bytes, served by this plugin's own board-scoped route. */
 function imageUrl(attachmentId) {
   return ROUTE.replace(/\/api$/, '/image') + '?id=' + encodeURIComponent(String(attachmentId))
+}
+
+// --------------------------------------------------------------- log view
+//
+// The developer log. Its content never rides the idle poll: the host withholds
+// it unless the view is open, so these helpers only ever run on a panel where
+// someone deliberately opened the log.
+
+/** `HH:MM:SS.mmm` from an epoch stamp — enough to line a line up with an action. */
+function logClock(ts) {
+  if (typeof ts !== 'number' || !isFinite(ts)) return '--:--:--'
+  const date = new Date(ts)
+  const pad = (n, width) => String(n).padStart(width === undefined ? 2 : width, '0')
+  return (
+    pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds()) +
+    '.' + pad(date.getMilliseconds(), 3)
+  )
+}
+
+/**
+ * One record's filterable text, lowercased once per render pass rather than per
+ * keystroke-range — the list is capped, so this stays cheap.
+ */
+function logHaystack(line) {
+  return (String(line.detail) + ' ' + String(line.logger) + ' ' + String(line.source)).toLowerCase()
+}
+
+/** Which source bucket a record belongs to, for the 来源 toggle. */
+function logSourceOf(line) {
+  // The host names this plugin's own fiber, so a record from us is exactly the
+  // one whose source matches. Anything else is another plugin's error (the
+  // exporter scope keeps those at `error` only).
+  return line.source === 'dsh-todo-board' ? 'self' : 'other'
+}
+
+/** Load the last-used source filter, defaulting to our own records. */
+function loadLogSource() {
+  try {
+    const raw = window.localStorage.getItem(LOG_SOURCE_KEY)
+    return raw === 'other' ? 'other' : 'self'
+  } catch (err) {
+    return 'self'
+  }
+}
+
+function saveLogSource(value) {
+  try {
+    window.localStorage.setItem(LOG_SOURCE_KEY, value)
+  } catch (err) {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * The whole log as plain text, for the clipboard and the download.
+ *
+ * Redaction already ran on every line at the host, but it runs AGAIN here on
+ * the assembled text. That is deliberate rather than redundant: this string
+ * leaves the machine — it is pasted into an issue or saved to a file and handed
+ * to someone else — and the host's guarantee covers what it stored, not what a
+ * future edit to this client might add.
+ */
+function logAsText(info) {
+  const lines = info === undefined || info === null ? [] : info.render
+  const head = [
+    '# dsh-todo-board 日志',
+    '# 导出时间：' + new Date().toISOString(),
+    '# 面板构建：v' + BUILD,
+    '# 记录数：' + (Array.isArray(lines) ? lines.length : 0),
+    '# 说明：本文件可能包含本机路径与其他插件的错误上下文，贴出去前请自行确认。',
+    '',
+  ]
+  const body = (Array.isArray(lines) ? lines : []).map(
+    (line) =>
+      logClock(line.ts) + ' ' + String(line.level).toUpperCase().padEnd(5) +
+      ' [' + (line.source || line.logger || '?') + '] ' + line.detail,
+  )
+  return head.concat(body).join('\n')
+}
+
+/** Trigger a browser download of `text`, without a server round trip. */
+function downloadText(filename, text) {
+  try {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    // Revoked on a later tick: revoking synchronously can cancel the download
+    // in some engines before it has read the blob.
+    window.setTimeout(() => URL.revokeObjectURL(url), 10000)
+    return true
+  } catch (err) {
+    return false
+  }
+}
+
+/** Copy `text`, falling back to a hidden textarea where the async API is absent. */
+function copyText(text) {
+  try {
+    if (navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(text).then(
+        () => true,
+        () => false,
+      )
+    }
+  } catch (err) {
+    /* fall through to the legacy path */
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const ok = document.execCommand('copy')
+    area.remove()
+    return Promise.resolve(ok)
+  } catch (err) {
+    return Promise.resolve(false)
+  }
 }
 
 // ------------------------------------------------------------- panel layout
@@ -501,6 +878,33 @@ function loadSections() {
 function saveSections(state) {
   try {
     window.localStorage.setItem(SECTIONS_KEY, JSON.stringify(state))
+  } catch (err) {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * Which skin the panel wears.
+ *
+ * Stored beside the layout and the folded sections, so it survives a reload the
+ * same way they do — a look you chose once is a look you keep. A stored id that
+ * is no longer in SKINS (a skin removed in an upgrade) falls back to the default
+ * instead of leaving the panel wearing nothing.
+ */
+const SKIN_KEY = 'dsh.todoBoard.skin.v1'
+
+function loadSkin() {
+  try {
+    const raw = window.localStorage.getItem(SKIN_KEY)
+    return typeof raw === 'string' && isSkin(raw) ? raw : SKINS[0].id
+  } catch (err) {
+    return SKINS[0].id
+  }
+}
+
+function saveSkin(id) {
+  try {
+    window.localStorage.setItem(SKIN_KEY, id)
   } catch (err) {
     /* storage unavailable */
   }
@@ -607,6 +1011,35 @@ function TodoBoard(props) {
   const [layout, setLayout] = React.useState(initial.clamped)
   const [cordisFound, setCordisFound] = React.useState(true)
   const [sections, setSections] = React.useState(loadSections)
+  const [skin, setSkin] = React.useState(loadSkin)
+  /**
+   * Whether the panel is showing the log instead of the board.
+   *
+   * Not persisted on purpose: this is a diagnostic view, and reopening the GUI
+   * into a log page would be a worse default than reopening into the board. The
+   * cost is that a reload closes it, which for a debugging trip is fine.
+   */
+  const [logOpen, setLogOpen] = React.useState(false)
+  const [logLevels, setLogLevels] = React.useState({ error: true, warn: true, info: false, debug: false })
+  const [logSource, setLogSource] = React.useState(loadLogSource)
+  const [logQuery, setLogQuery] = React.useState('')
+  const [logLines, setLogLines] = React.useState([])
+  /** Newest `sn` collected, so each poll asks only for what it lacks. */
+  const logCursorRef = React.useRef(0)
+  /** Newest error/warn `sn` the user has already looked at. */
+  const logSeenRef = React.useRef(0)
+  /**
+   * `logOpen`, readable from the polling closure.
+   *
+   * The interval effect runs ONCE (empty deps), so it captures the first
+   * render's `refresh` — where `logOpen` is `false` forever. Reading the state
+   * variable there would leave the log view frozen at whatever the open-effect
+   * fetched, with the 2.5s poll silently never updating it. A ref is the only
+   * way that once-installed interval can see the current value.
+   */
+  const logOpenRef = React.useRef(false)
+  const [logNote, setLogNote] = React.useState('')
+  const [logCopied, setLogCopied] = React.useState('')
   const preferredRef = React.useRef(initial.preferred)
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
@@ -745,6 +1178,22 @@ function TodoBoard(props) {
     setOpen((current) => !current)
   }
 
+  /**
+   * Step to the next skin and remember it.
+   *
+   * A cycle rather than a picker: with three looks, a cycle needs no menu, no
+   * chrome and no room — and the one place it lives (the title bar) is the one
+   * place you are already looking when you want the panel to look different.
+   */
+  function cycleSkin() {
+    setSkin((current) => {
+      const at = SKINS.findIndex((entry) => entry.id === current)
+      const next = SKINS[(at + 1) % SKINS.length].id
+      saveSkin(next)
+      return next
+    })
+  }
+
   // Grow the composer with its content, up to the CSS max-height.
   React.useEffect(() => {
     const el = inputRef.current
@@ -762,6 +1211,59 @@ function TodoBoard(props) {
     el.style.height = Math.min(el.scrollHeight, 220) + 'px'
   }, [editText, editId])
 
+  /**
+   * Fetch log records newer than what we hold.
+   *
+   * Runs on the SAME 2.5s cadence as the board poll and only while the view is
+   * open — diagnostics do not need to be live, and reusing the existing poll
+   * means no second transport to keep working. Errors are contained: a failing
+   * log fetch must not disturb the board, which is the panel's actual job.
+   */
+  function refreshLogs() {
+    transport.logs(logCursorRef.current).then(
+      (result) => {
+        const info = result === null || result === undefined ? undefined : result.logs
+        if (info === undefined) {
+          // A blank page reads as "nothing was ever logged", which is the one
+          // wrong answer here. Say what actually happened instead: the host
+          // answered without any log payload, which means an older host build
+          // (pre-0.9.0) or a route that refused the request.
+          setLogNote('主机没有返回日志内容 —— 可能是插件主机半边未更新（本页需要 0.9.0 及以上）')
+          return
+        }
+        if (typeof info.cursor === 'number' && info.cursor > logCursorRef.current) {
+          logCursorRef.current = info.cursor
+        }
+        // Everything the view is now showing counts as read, so closing it
+        // leaves no dot behind for records the user just looked at.
+        logSeenRef.current = Math.max(logSeenRef.current, logCursorRef.current)
+        const fresh = Array.isArray(info.lines) ? info.lines : []
+        if (fresh.length > 0) {
+          setLogLines((current) => {
+            const merged = current.concat(fresh)
+            // Trim from the FRONT: the newest records are the ones a reader is
+            // looking at, and a capped list that dropped them would be useless.
+            return merged.length > LOG_KEEP ? merged.slice(merged.length - LOG_KEEP) : merged
+          })
+        }
+        // The ring may have recycled past our cursor while the view was closed,
+        // which reads as "nothing happened" unless we say so. The host's ring
+        // size is not named here: this client does not know it, and inventing a
+        // number would be worse than saying what actually happened.
+        const notes = []
+        if (info.truncated === true) notes.push('更早的记录已被内存环回收，完整历史在落盘文件里')
+        if (info.dropped > 0) notes.push('进程启动以来已丢弃 ' + info.dropped + ' 条')
+        if (info.fileOff === true) {
+          notes.push('日志文件写入已停用（' + (info.fileError || '未知原因') + '），内存日志仍在')
+        } else if (typeof info.file === 'string' && info.file !== '') {
+          notes.push('落盘：' + info.file)
+        }
+        setLogNote(notes.join(' · '))
+      },
+      (failure) => setLogNote('读取日志失败：' + describe(failure)),
+    )
+  }
+
   function refresh() {
     transport.snapshot().then(
       (result) => {
@@ -773,6 +1275,10 @@ function TodoBoard(props) {
       },
       (failure) => setErr(describe(failure)),
     )
+    // `logOpenRef`, not `logOpen`: `refresh` is captured by an interval
+    // installed once (empty deps), so the state variable would be frozen at its
+    // first value (`false`) and the open log view would never update again.
+    if (logOpenRef.current) refreshLogs()
     collapseCordisFooter()
     anchorCordisPanel()
     setCordisFound(cordisBadge() !== null)
@@ -783,6 +1289,18 @@ function TodoBoard(props) {
     const id = window.setInterval(refresh, 2500)
     return () => window.clearInterval(id)
   }, [])
+
+  /**
+   * Fetch as soon as the view opens.
+   *
+   * The 2.5s interval alone would leave a blank panel for up to one tick after
+   * a click, which reads as "the button did nothing" — the one moment this
+   * feature must not look broken.
+   */
+  React.useEffect(() => {
+    logOpenRef.current = logOpen
+    if (logOpen) refreshLogs()
+  }, [logOpen])
 
   // Ask once for desktop-notification permission, so a due 「提醒」待办 can
   // surface even while the panel is collapsed.
@@ -817,6 +1335,94 @@ function TodoBoard(props) {
       groups.push({ key, items: [] })
     }
     groups[index[key]].items.push(todo)
+  }
+
+  // ------------------------------------------------------------ log view data
+
+  /**
+   * The dot on the log button: lit when an error/warn arrived that the user has
+   * not looked at yet.
+   *
+   * `!logOpen` is part of the condition, not an optimisation. An error that
+   * arrives WHILE the view is open must not light a dot on the page the user is
+   * already reading — and it would, because the cursor that clears the dot is
+   * only ever compared against records the user has actually been shown. The
+   * effect below keeps the cursor level with what the open view has displayed.
+   *
+   * It is fed by `data.logAlert`, which the host sends on EVERY poll even with
+   * the view closed. That is the deliberate exception to "no log leaves the
+   * host": one number, no text, and without it the dot could only appear after
+   * the user opened the view it is supposed to be pointing at.
+   */
+  const alertSn =
+    data !== null && data !== undefined && data.logAlert !== undefined && data.logAlert !== null &&
+    typeof data.logAlert.sn === 'number'
+      ? data.logAlert.sn
+      : 0
+  const logAlert = !logOpen && alertSn > logSeenRef.current && alertSn > 0
+
+  const activeLevels = LOG_LEVELS.filter((level) => logLevels[level] === true)
+  const query = logQuery.trim().toLowerCase()
+  const logRender = logLines.filter((line) => {
+    if (activeLevels.indexOf(String(line.level)) < 0) return false
+    const source = logSourceOf(line)
+    if (logSource === 'self' && source !== 'self') return false
+    // "全部" shows everything the exporter delivered; "其他插件" narrows to
+    // records the exporter only ever admits at `error`, so the label says so.
+    if (logSource === 'other' && source !== 'other') return false
+    if (query !== '' && !logHaystack(line).includes(query)) return false
+    return true
+  })
+  // Newest first: the reason someone opens this view is the thing that just
+  // broke, and the newest record is always at the top without scrolling.
+  const logShown = logRender.slice().reverse()
+  const latestError = logLines.filter((line) => line.level === 'error').length
+
+  function toggleLog() {
+    setLogOpen((current) => !current)
+  }
+
+  function toggleLogLevel(level) {
+    setLogLevels((current) => {
+      const next = { ...current, [level]: !current[level] }
+      // Never leave every filter off: an empty list would be indistinguishable
+      // from "nothing was logged", which is the one wrong answer here.
+      if (!LOG_LEVELS.some((id) => next[id] === true)) return current
+      return next
+    })
+  }
+
+  function cycleLogSource() {
+    setLogSource((current) => {
+      const next = current === 'self' ? 'other' : current === 'other' ? 'all' : 'self'
+      saveLogSource(next)
+      return next
+    })
+  }
+
+  function copyLog() {
+    const text = logAsText({ render: logShown })
+    copyText(text).then((ok) => {
+      setLogCopied(ok ? '已复制 ' + logShown.length + ' 条' : '复制失败')
+      window.setTimeout(() => setLogCopied(''), 2000)
+    })
+  }
+
+  function exportLog() {
+    const text = logAsText({ render: logShown })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const ok = downloadText('dsh-todo-board-log-' + stamp + '.txt', text)
+    setLogCopied(ok ? '已导出' : '导出失败')
+    window.setTimeout(() => setLogCopied(''), 2000)
+  }
+
+  function clearLogView() {
+    // Local only, and deliberately so: this drops the panel's copy, not the
+    // host's records. A "clear" that deleted evidence on the host would be a
+    // trap on a diagnostic surface.
+    setLogLines([])
+    setLogCopied('已清空本面板显示')
+    window.setTimeout(() => setLogCopied(''), 2000)
   }
 
   async function call(method, args) {
@@ -854,37 +1460,111 @@ function TodoBoard(props) {
     })
   }
 
-  /** Read one picked file into the wire shape the host admits. */
+  /** Read one image file into the wire shape the host admits. */
   function readImageFile(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader()
-      reader.onerror = () => reject(new Error('读取失败：' + file.name))
+      reader.onerror = () => reject(new Error('读取失败：' + (file.name || '剪贴板图片')))
       reader.onload = () => {
         const result = typeof reader.result === 'string' ? reader.result : ''
         const comma = result.indexOf(',')
         if (comma < 0) {
-          reject(new Error('无法编码：' + file.name))
+          reject(new Error('无法编码：' + (file.name || '剪贴板图片')))
           return
         }
         resolve({
           data: result.slice(comma + 1),
-          mediaType: file.type,
-          name: file.name,
+          // A clipboard image does not always carry a MIME type — a screenshot
+          // from some tools arrives with an empty `type`. The host validates the
+          // media type strictly and would reject it as 「(未声明)」, so fall back
+          // to the filename's extension, which is what the host itself would do.
+          mediaType: imageMediaType(file),
+          name: file.name || 'clipboard.png',
         })
       }
       reader.readAsDataURL(file)
     })
   }
 
-  function pickImages(event) {
-    const files = Array.from((event.target.files || []))
-    event.target.value = ''
+  /**
+   * The MIME type to send for one picked or pasted image.
+   *
+   * `file.type` first, because that is the browser's own answer and it is right
+   * for every normal paste. The extension is the fallback for the clipboard
+   * cases that arrive without one.
+   */
+  function imageMediaType(file) {
+    if (typeof file.type === 'string' && file.type !== '') return file.type
+    const name = typeof file.name === 'string' ? file.name : ''
+    const dot = name.lastIndexOf('.')
+    if (dot < 0) return ''
+    return MEDIA_TYPE_BY_EXTENSION[name.slice(dot + 1).toLowerCase()] || ''
+  }
+
+  /** Whether one clipboard entry is an image this panel can carry. */
+  function isImageFile(file) {
+    if (file === null || file === undefined) return false
+    if (typeof file.type === 'string' && file.type.indexOf('image/') === 0) return true
+    // No type at all: accept it only if the name says it is one of the four
+    // formats the host admits, so an unknown extension cannot ride along.
+    return typeof file.type === 'string' && file.type === '' && imageMediaType(file) !== ''
+  }
+
+  /**
+   * The image files on one clipboard payload, in clipboard order.
+   *
+   * Both faces are read because they disagree about what pasting a file means:
+   * `files` is the flat list, `items` distinguishes an image from the text you
+   * copied alongside it. Either alone misses real pastes.
+   */
+  function clipboardImages(clipboard) {
+    if (clipboard === null || clipboard === undefined) return []
+    const out = []
+    const files = clipboard.files
+    if (files !== undefined && files !== null && files.length > 0) {
+      for (const file of Array.from(files)) if (isImageFile(file)) out.push(file)
+      if (out.length > 0) return out
+    }
+    const items = clipboard.items
+    if (items === undefined || items === null) return out
+    for (const item of Array.from(items)) {
+      if (item.kind !== 'file') continue
+      const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null
+      if (isImageFile(file)) out.push(file)
+    }
+    return out
+  }
+
+  /**
+   * Attach whatever images a paste carried.
+   *
+   * `preventDefault` fires **only** when there really are images on the
+   * clipboard: pasting text into the composer is the ordinary way to write a
+   * task, and swallowing that would break the main input to support a side one.
+   * The paste is left entirely alone when it is text.
+   */
+  function pasteImages(event) {
+    const files = clipboardImages(event.clipboardData)
     if (files.length === 0) return
+    // An image paste never also means "insert this text", so the default is
+    // suppressed from here on — including the over-limit case, where the point
+    // is to say why nothing was attached rather than to paste a filename.
+    event.preventDefault()
+    if (pending.length >= MAX_IMAGES) {
+      setErr('一条待办最多带 ' + MAX_IMAGES + ' 张图片，先移除一张再粘贴')
+      return
+    }
+    const room = MAX_IMAGES - pending.length
+    const wanted = files.slice(0, room)
     setBusy(true)
-    Promise.all(files.map(readImageFile)).then(
+    Promise.all(wanted.map(readImageFile)).then(
       (encoded) => {
         setPending((current) => current.concat(encoded).slice(0, MAX_IMAGES))
-        setErr('')
+        setErr(
+          files.length > room
+            ? '只粘贴了前 ' + room + ' 张（上限 ' + MAX_IMAGES + ' 张），其余已忽略'
+            : '',
+        )
         setBusy(false)
       },
       (failure) => {
@@ -1304,6 +1984,8 @@ function TodoBoard(props) {
       'div',
       {
         className: 'dshtb-root',
+        // The skin travels with the parked line too: it is the same panel.
+        'data-dshtb-skin': skin,
         style:
           layout === null
             ? {}
@@ -1376,6 +2058,15 @@ function TodoBoard(props) {
     ),
   )
 
+  // The title-bar control doubles as the readout of which skin is on: its glyph
+  // is the skin, and its tooltip names that skin and what it changes. Resolved
+  // from the same table the cycle walks, so the label can never describe a
+  // different skin than the one being applied.
+  const activeSkin = SKINS.find((entry) => entry.id === skin) || SKINS[0]
+  const skinName = activeSkin.name
+  const skinHint = activeSkin.hint
+  const skinGlyph = activeSkin.glyph
+
   const rootStyle =
     layout === null
       ? {}
@@ -1389,9 +2080,98 @@ function TodoBoard(props) {
           maxHeight: 'none',
         }
 
+  /**
+   * The log page, rendered in place of the board inside the same floating
+   * window — same frame, same drag and resize, no second window. Deliberately
+   * plain: it is a developer surface, so it uses monospace, wraps long text and
+   * spends no effort on decoration.
+   */
+  const logView = h(
+    'div',
+    { className: 'dshtb-logview' },
+    h(
+      'div',
+      { className: 'dshtb-logbar' },
+      LOG_LEVELS.map((level) =>
+        h(
+          'button',
+          {
+            key: level,
+            className: logLevels[level] === true ? 'on' : '',
+            title: '显示 ' + level + ' 级别的记录',
+            onClick: () => toggleLogLevel(level),
+          },
+          level,
+        ),
+      ),
+      h(
+        'button',
+        {
+          className: 'dshtb-logsrc',
+          title:
+            logSource === 'self'
+              ? '当前只显示本插件的记录；点击切到「其他插件」（只会有 error）'
+              : logSource === 'other'
+                ? '当前只显示其他插件的 error；点击切到「全部」'
+                : '当前显示全部来源；点击切回「本插件」',
+          onClick: cycleLogSource,
+        },
+        logSource === 'self' ? '本插件' : logSource === 'other' ? '其他插件' : '全部',
+      ),
+      h('input', {
+        className: 'dshtb-logfilter',
+        placeholder: '过滤关键字…',
+        value: logQuery,
+        onChange: (e) => setLogQuery(e.target.value),
+      }),
+    ),
+    h(
+      'div',
+      { className: 'dshtb-logbar' },
+      h('button', { title: '把当前筛选出的记录复制到剪贴板', onClick: copyLog }, '复制'),
+      h('button', { title: '导出为 .txt（已再次脱敏）', onClick: exportLog }, '导出'),
+      h('button', { title: '只清空本面板的显示，不影响主机上的记录', onClick: clearLogView }, '清空显示'),
+      logCopied !== '' ? h('span', { className: 'dshtb-logmeta' }, logCopied) : null,
+    ),
+    h(
+      'div',
+      { className: 'dshtb-logmeta' },
+      '显示 ' + logShown.length + ' / ' + logLines.length + ' 条（错误 ' + latestError + '）',
+      logNote === '' ? null : ' · ' + logNote,
+    ),
+    logShown.length === 0
+      ? h(
+          'div',
+          { className: 'dshtb-logempty' },
+          logLines.length === 0
+            ? '还没有日志。这里记录本插件的失败路径（派发失败、建会话失败、读写板失败等）。'
+            : '当前筛选下没有记录。试试放宽级别，或把来源切到「全部」。',
+        )
+      : h(
+          'div',
+          { className: 'dshtb-loglist' },
+          logShown.map((line, at) =>
+            h(
+              'div',
+              { key: String(line.sn) + '-' + at, className: 'dshtb-logrow ' + String(line.level) },
+              h('span', { className: 'at' }, logClock(line.ts)),
+              h('span', { className: 'lv' }, String(line.level)),
+              h(
+                'span',
+                { className: 'body' },
+                line.detail,
+                line.source === '' || line.source === 'dsh-todo-board'
+                  ? null
+                  : h('span', { className: 'src' }, '  ← ' + line.source),
+              ),
+            ),
+          ),
+        ),
+  )
+
   return h(
     'div',
-    { className: 'dshtb-root', style: rootStyle },
+    { className: 'dshtb-root', 'data-dshtb-skin': skin, style: rootStyle },
     h(
       'div',
       { className: 'dshtb-card' },
@@ -1429,6 +2209,37 @@ function TodoBoard(props) {
         h(
           'button',
           {
+            className: 'dshtb-skin',
+            title:
+              '界面：' + skinName + '\n' + skinHint + '\n点击切换下一套（共 ' + SKINS.length + ' 套）',
+            'aria-label': '切换界面风格（当前：' + skinName + '）',
+            onClick: cycleSkin,
+          },
+          skinGlyph,
+        ),
+        h(
+          'button',
+          {
+            // The dot is the whole "tell the developer without bothering the
+            // user" mechanism: the log itself stays out of the way until this
+            // button is clicked, and this button only advertises itself when
+            // something actually went wrong.
+            className: 'dshtb-log' + (logOpen ? ' on' : ''),
+            title: logOpen
+              ? '回到待办面板'
+              : '开发者日志' +
+                (logAlert ? '（有新的错误）' : '') +
+                '\n平时用不到；出问题时把这里的内容复制给开发者看。',
+            'aria-label': logOpen ? '回到待办面板' : '打开开发者日志',
+            'aria-pressed': logOpen ? 'true' : 'false',
+            onClick: toggleLog,
+          },
+          logOpen ? '\u2190' : '\u2699',
+          logAlert ? h('span', { className: 'dshtb-dot' }) : null,
+        ),
+        h(
+          'button',
+          {
             className: 'dshtb-fold',
             title: '收起为一行（只留计数与下一条待办）',
             'aria-label': '收起为一行',
@@ -1437,183 +2248,196 @@ function TodoBoard(props) {
           '\u2013',
         ),
       ),
-      h('div', { className: 'dshtb-seg' }, segments),
-      ...foldable({
-        id: 'compose',
-        name: '新增待办',
-        open: sections.compose,
-        onToggle: toggleSection,
-        body: h(
-          'div',
-          { className: 'dshtb-compose', key: 'compose-body' },
-          h(
-            'div',
-            { className: 'dshtb-add' },
-            h('textarea', {
-              ref: inputRef,
-              rows: 3,
-              placeholder: '新增待办…（Enter 添加，Shift+Enter 换行）',
-              value: draft,
-              onChange: (e) => setDraft(e.target.value),
-              onKeyDown: (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  add()
-                }
-              },
-            }),
-            h(
-              'button',
-              { className: 'dshtb-ic', title: '添加', disabled: busy || draft.trim() === '', onClick: add },
-              '\uFF0B',
-            ),
-          ),
-          h(
-            'div',
-            { className: 'dshtb-attach' },
-            h('label', { className: 'dshtb-link' + (pending.length >= MAX_IMAGES ? ' off' : ''), title: '给这条待办附图（最多 ' + MAX_IMAGES + ' 张，PNG/JPG/WebP/GIF）' },
-              '\uD83D\uDCCE 图片',
-              h('input', {
-                type: 'file',
-                accept: 'image/png,image/jpeg,image/webp,image/gif',
-                multiple: true,
-                disabled: pending.length >= MAX_IMAGES,
-                style: { display: 'none' },
-                onChange: pickImages,
-              }),
-            ),
-            pending.length === 0
-              ? null
-              : h(
-                  'div',
-                  { className: 'dshtb-thumbs' },
-                  pending.map((image, at) =>
+      logOpen ? logView : null,
+      logOpen ? null : h('div', { className: 'dshtb-seg' }, segments),
+      // `foldable` returns an ARRAY of [header, body], so it is always spread
+      // rather than passed as one child. Nesting the array as a child works in
+      // React but hides the subtree from anything that walks `children`
+      // directly, which is what the browser-half suite does.
+      ...(logOpen
+        ? []
+        : foldable({
+            id: 'compose',
+            name: '新增待办',
+            open: sections.compose,
+            onToggle: toggleSection,
+            body: h(
+              'div',
+              { className: 'dshtb-compose', key: 'compose-body' },
+              h(
+                'div',
+                { className: 'dshtb-add' },
+                h('textarea', {
+                  ref: inputRef,
+                  rows: 3,
+                  placeholder:
+                    '新增待办…（Enter 添加，Shift+Enter 换行，Ctrl+V 粘贴截图）',
+                  value: draft,
+                  onChange: (e) => setDraft(e.target.value),
+                  onPaste: pasteImages,
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      add()
+                    }
+                  },
+                }),
+                h(
+                  'button',
+                  { className: 'dshtb-ic', title: '添加', disabled: busy || draft.trim() === '', onClick: add },
+                  '\uFF0B',
+                ),
+              ),
+              // No picker button and no standing hint: images arrive by pasting into
+              // the composer above, and the composer's own placeholder already names
+              // Ctrl+V. The attachment area therefore renders NOTHING while empty —
+              // the counter appears only once something is attached, which is when
+              // it carries information. Format support and the per-todo limit are
+              // unchanged: both are enforced on paste and reported when they bite.
+              pending.length === 0
+                ? null
+                : h(
+                    'div',
+                    { className: 'dshtb-attach' },
                     h(
-                      'button',
-                      {
-                        key: 'p' + at,
-                        className: 'dshtb-thumb',
-                        title: (image.name || '图片') + '（点击移除）',
-                        onClick: () => setPending((current) => current.filter((_, i) => i !== at)),
-                      },
-                      h('img', { src: 'data:' + image.mediaType + ';base64,' + image.data, alt: image.name || '' }),
-                      h('span', { className: 'x' }, '\u2715'),
+                      'div',
+                      { className: 'dshtb-hint' },
+                      '已附 ' + pending.length + ' / ' + MAX_IMAGES + ' 张 · 点缩略图移除',
+                    ),
+                    h(
+                      'div',
+                      { className: 'dshtb-thumbs' },
+                      pending.map((image, at) =>
+                        h(
+                          'button',
+                          {
+                            key: 'p' + at,
+                            className: 'dshtb-thumb',
+                            title: (image.name || '图片') + '（点击移除）',
+                            onClick: () => setPending((current) => current.filter((_, i) => i !== at)),
+                          },
+                          h('img', { src: 'data:' + image.mediaType + ';base64,' + image.data, alt: image.name || '' }),
+                          h('span', { className: 'x' }, '\u2715'),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-          ),
-          h(
-            'div',
-            { className: 'dshtb-modes' },
-            MODES.map((id) =>
               h(
-                'button',
-                { key: id, className: mode === id ? 'on' : '', title: MODE_LABEL[id], onClick: () => setMode(id) },
-                MODE_SHORT[id],
+                'div',
+                { className: 'dshtb-modes' },
+                MODES.map((id) =>
+                  h(
+                    'button',
+                    { key: id, className: mode === id ? 'on' : '', title: MODE_LABEL[id], onClick: () => setMode(id) },
+                    MODE_SHORT[id],
+                  ),
+                ),
+              ),
+              h('div', { className: 'dshtb-hint' }, MODE_HINT[mode]),
+              h(
+                'div',
+                { className: 'dshtb-when' },
+                h('span', { className: 'lbl' }, '定时'),
+                h('input', {
+                  type: 'datetime-local',
+                  value: when,
+                  title: '到点后才执行（留空 = 立即可以执行）',
+                  onChange: (e) => setWhen(e.target.value),
+                }),
+                when !== ''
+                  ? h(
+                      'button',
+                      {
+                        className: 'dshtb-ic',
+                        title: '取消定时',
+                        onClick: () => setWhen(''),
+                      },
+                      '\u2715',
+                    )
+                  : h('span', { className: 'dshtb-hint' }, '不填'),
+              ),
+              h(
+                'div',
+                { className: 'dshtb-dir' },
+                h('span', { className: 'lbl' }, '目录'),
+                h('input', {
+                  // Empty means 「跟随当前会话」, not 「no directory」, and the old
+                  // placeholder ("目录：<cwd>") read like a value that was already
+                  // filled in. Say what an empty field will actually do instead.
+                  placeholder: cwd === '' ? '留空 = 用当前会话的工作目录' : '留空 = ' + cwd,
+                  title:
+                    '这条待办归到哪个目录：它决定分组、决定「当前目录」筛选，' +
+                    '也决定回合结束后由哪个会话来接续。留空 = 跟随当前会话的工作目录。',
+                  value: dirInput,
+                  onChange: (e) => setDirInput(e.target.value),
+                }),
               ),
             ),
-          ),
-          h('div', { className: 'dshtb-hint' }, MODE_HINT[mode]),
-          h(
-            'div',
-            { className: 'dshtb-when' },
-            h('span', { className: 'lbl' }, '定时'),
-            h('input', {
-              type: 'datetime-local',
-              value: when,
-              title: '到点后才执行（留空 = 立即可以执行）',
-              onChange: (e) => setWhen(e.target.value),
-            }),
-            when !== ''
-              ? h(
-                  'button',
-                  {
-                    className: 'dshtb-ic',
-                    title: '取消定时',
-                    onClick: () => setWhen(''),
-                  },
-                  '\u2715',
-                )
-              : h('span', { className: 'dshtb-hint' }, '不填'),
-          ),
-          h(
-            'div',
-            { className: 'dshtb-dir' },
-            h('span', { className: 'lbl' }, '目录'),
-            h('input', {
-              // Empty means 「跟随当前会话」, not 「no directory」, and the old
-              // placeholder ("目录：<cwd>") read like a value that was already
-              // filled in. Say what an empty field will actually do instead.
-              placeholder: cwd === '' ? '留空 = 用当前会话的工作目录' : '留空 = ' + cwd,
-              title:
-                '这条待办归到哪个目录：它决定分组、决定「当前目录」筛选，' +
-                '也决定回合结束后由哪个会话来接续。留空 = 跟随当前会话的工作目录。',
-              value: dirInput,
-              onChange: (e) => setDirInput(e.target.value),
-            }),
-          ),
-        ),
-      }),
-      ...foldable({
-        id: 'list',
-        name: '待办列表',
-        note: visible.length,
-        open: sections.list,
-        onToggle: toggleSection,
-        body:
-          rows.length === 0
-            ? h(
-                'div',
-                { className: 'dshtb-empty', key: 'list-body' },
-                h('b', null, '\u2610'),
-                h(
-                  'span',
-                  null,
-                  filter === 'dir' ? '当前目录还没有待办' : '这里还没有待办',
-                ),
-              )
-            : h('div', { className: 'dshtb-list', key: 'list-body' }, rows),
-      }),
+          })),
+      ...(logOpen
+        ? []
+        : foldable({
+            id: 'list',
+            name: '待办列表',
+            note: visible.length,
+            open: sections.list,
+            onToggle: toggleSection,
+            body:
+              rows.length === 0
+                ? h(
+                    'div',
+                    { className: 'dshtb-empty', key: 'list-body' },
+                    h('b', null, '\u2610'),
+                    h(
+                      'span',
+                      null,
+                      filter === 'dir' ? '当前目录还没有待办' : '这里还没有待办',
+                    ),
+                  )
+                : h('div', { className: 'dshtb-list', key: 'list-body' }, rows),
+          })),
       err !== '' ? h('div', { className: 'dshtb-err' }, err) : null,
       data !== null && data !== undefined && data.storageError
         ? h('div', { className: 'dshtb-err' }, data.storageError)
         : null,
-      ...foldable({
-        id: 'panel',
-        name: '面板',
-        open: sections.panel,
-        onToggle: toggleSection,
-        body: h(
-          'div',
-          { className: 'dshtb-foot', key: 'panel-body' },
-          h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
-          h('span', null, '未验收 ' + openCount),
-          awaitingVerify > 0 ? h('span', null, '· 待验 ' + awaitingVerify) : null,
-          h('span', { className: 'dshtb-sp' }),
-          verifiedCount > 0
-            ? h(
+      ...(logOpen
+        ? []
+        : foldable({
+            id: 'panel',
+            name: '面板',
+            open: sections.panel,
+            onToggle: toggleSection,
+            body: h(
+              'div',
+              { className: 'dshtb-foot', key: 'panel-body' },
+              h('span', { title: '客户端构建标记，用来确认浏览器加载的是哪一版' }, 'v' + BUILD),
+              h('span', null, '未验收 ' + openCount),
+              awaitingVerify > 0 ? h('span', null, '· 待验 ' + awaitingVerify) : null,
+              h('span', { className: 'dshtb-sp' }),
+              verifiedCount > 0
+                ? h(
+                    'button',
+                    {
+                      className: 'dshtb-link',
+                      title: '删除所有已验收的条目（共 ' + verifiedCount + ' 条）',
+                      onClick: () => call('clearVerified'),
+                    },
+                    '清理已验收 ' + verifiedCount,
+                  )
+                : null,
+              h(
                 'button',
                 {
-                  className: 'dshtb-link',
-                  title: '删除所有已验收的条目（共 ' + verifiedCount + ' 条）',
-                  onClick: () => call('clearVerified'),
+                  className: 'dshtb-link' + (cordisFound ? '' : ' off'),
+                  title: cordisFound
+                    ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
+                    : '找不到 Cordis 入口，暂时打不开',
+                  onClick: openCordisPanel,
                 },
-                '清理已验收 ' + verifiedCount,
-              )
-            : null,
-          h(
-            'button',
-            {
-              className: 'dshtb-link' + (cordisFound ? '' : ' off'),
-              title: cordisFound
-                ? '打开 Cordis 动态插件面板（显示在本面板正下方）'
-                : '找不到 Cordis 入口，暂时打不开',
-              onClick: openCordisPanel,
-            },
-            'Cordis Plugin',
-          ),
-          ),
-      }),
+                'Cordis Plugin',
+              ),
+            ),
+          })),
       h('div', {
         className: 'dshtb-resize',
         title: '拖动缩放 · 双击还原',
@@ -1654,6 +2478,24 @@ exports.apply = function apply(ctx) {
     },
     'dsh-todo-board: styles',
   )
+
+  // One tag per skin, all live at once and scoped under the root's
+  // `data-dshtb-skin`, so switching is an attribute write on one node: no
+  // re-injection, no flash of unstyled panel, and unregistering the default
+  // skin stays impossible because its rules are never removed.
+  for (const id of Object.keys(SKIN_CSS)) {
+    ctx.effect(
+      () => {
+        const style = document.createElement('style')
+        style.setAttribute('data-dsh-todo-board', '')
+        style.setAttribute('data-dsh-todo-board-skin', id)
+        style.textContent = SKIN_CSS[id]
+        document.head.appendChild(style)
+        return () => style.remove()
+      },
+      'dsh-todo-board: skin ' + id,
+    )
+  }
 
   ctx.effect(() => () => restoreCordisFooter(), 'dsh-todo-board: cordis bridge')
 

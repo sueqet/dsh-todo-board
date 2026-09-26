@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 // ------------------------------------------------------------- React shim
 
@@ -111,14 +112,29 @@ const listeners = []
 
 // The interval the polling effect installs is never fired: this test drives
 // renders through the controls, not through the clock.
+/**
+ * The callbacks registered through `window.setInterval`, so a test can drive the
+ * poll explicitly.
+ *
+ * The panel's polling effect installs one interval on mount, and everything it
+ * captures comes from THAT first render. A stale closure there is a real bug
+ * class (state read inside a once-installed interval), and it cannot be seen
+ * without the ability to fire the tick.
+ */
+const intervals = []
+
 globalThis.window = {
   localStorage: {
     getItem: (key) => (storage.has(key) ? storage.get(key) : null),
     setItem: (key, value) => storage.set(key, String(value)),
     removeItem: (key) => storage.delete(key),
   },
-  setInterval: () => 1,
+  setInterval: (fn) => (intervals.push(fn), intervals.length),
   clearInterval: () => {},
+  // The log view uses this to clear its transient "已复制" note; without it the
+  // copy/export paths would throw instead of merely being untested.
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id),
   addEventListener: (type, listener) => listeners.push({ type, listener }),
   removeEventListener: (type, listener) => {
     const at = listeners.findIndex((l) => l.type === type && l.listener === listener)
@@ -140,8 +156,103 @@ function resizeTo(width, height) {
 globalThis.document = {
   querySelector: () => null,
   querySelectorAll: () => [],
-  createElement: () => ({ setAttribute() {}, remove() {}, style: {} }),
-  head: { appendChild() {} },
+  createElement: (tag) => {
+    const attrs = {}
+    const node = {
+      tagName: tag,
+      setAttribute: (name, value) => {
+        attrs[name] = value
+      },
+      getAttribute: (name) => (name in attrs ? attrs[name] : null),
+      remove() {},
+      style: {},
+      // The export path builds an <a download> and clicks it; recording that
+      // click is how the test observes a download without a real browser.
+      click() {
+        if (tag === 'a' && typeof node.download === 'string') {
+          downloads.push({ filename: node.download, href: node.href })
+        }
+      },
+    }
+    return node
+  },
+  // Recorded, not discarded: which stylesheets a plugin installs is exactly the
+  // kind of thing that silently stops happening.
+  head: {
+    appendChild(node) {
+      headStyles.push(node)
+    },
+  },
+  body: {
+    appendChild() {},
+  },
+}
+
+/** Downloads triggered through a stub `<a download>`, in order. */
+const downloads = []
+
+/** Every <style> apply() has installed, in order. */
+const headStyles = []
+
+/**
+ * `FileReader`, reduced to what the panel uses: `readAsDataURL` plus the two
+ * handlers it assigns. Real enough to prove the encoder is wired up, and
+ * deliberately async-flavoured (the callback runs on a later tick) so a test
+ * cannot accidentally depend on it resolving synchronously.
+ */
+const readAsDataURL = []
+globalThis.FileReader = class {
+  readAsDataURL(file) {
+    readAsDataURL.push(file)
+    // Some files carry no MIME type — exactly the clipboard case the panel has
+    // to survive — so the stub encodes what it was given and lets the panel add
+    // the media type, rather than inventing one here.
+    const type = typeof file.type === 'string' && file.type !== '' ? file.type : 'application/octet-stream'
+    setTimeout(() => {
+      if (typeof this.onerror === 'function' && file.__readFails === true) {
+        this.onerror(new Error('stub read failure'))
+        return
+      }
+      this.result = 'data:' + type + ';base64,' + String(file.__base64 || 'QUJD')
+      if (typeof this.onload === 'function') this.onload({})
+    }, 0)
+  }
+}
+
+/** One image file as the browser would hand it over on a clipboard payload. */
+function imageFile(name, type, base64) {
+  return { name, type, __base64: base64 === undefined ? 'QUJD' : base64 }
+}
+
+/** A plain text/plain clipboard, as a normal copy produces. */
+function textClipboard(text) {
+  return { files: [], items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], __text: text }
+}
+
+/** A clipboard carrying images, reachable through both faces the panel reads. */
+function imageClipboard(files) {
+  return {
+    files,
+    items: files.map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })),
+  }
+}
+
+/**
+ * A paste event whose `preventDefault` is recorded.
+ *
+ * Whether the panel suppresses the default is the whole contract of this
+ * feature: swallowing a text paste would break the composer's main input.
+ */
+function pasteEvent(clipboard) {
+  const event = {
+    clipboardData: clipboard,
+    defaultPrevented: false,
+    preventDefault() {
+      event.defaultPrevented = true
+    },
+    stopPropagation() {},
+  }
+  return event
 }
 
 // ------------------------------------------------------------ board data
@@ -194,6 +305,10 @@ function todo(over) {
 const snapshot = {
   ok: true,
   storagePath: 'D:\\DSH\\dsh-home\\todo-board\\board.json',
+  // The alert cursor rides every poll, including the idle one. It is the ONE
+  // thing about the log that leaves the host while the view is closed, and the
+  // dot on the log button is the only thing it feeds.
+  logAlert: { sn: 30, at: 1700000002000 },
   todos: [
     todo({ id: 'a', title: '下一条要做的', order: 0 }),
     todo({ id: 'b', title: 'AI 已做完的', order: 1, aiDone: true }),
@@ -204,7 +319,47 @@ const snapshot = {
 /** Every POST the panel makes, so a test can assert on the wire payload. */
 const calls = []
 
+/**
+ * Log records the stubbed host would return, newest last.
+ *
+ * `sn` values are deliberately sparse (10, 20 …) so a test can tell "the panel
+ * asked from the right cursor" apart from "the panel re-fetched everything".
+ */
+const logLines = [
+  { sn: 10, ts: 1700000000000, level: 'info', source: 'dsh-todo-board', logger: 'dsh-todo-board', detail: '启动完成' },
+  { sn: 20, ts: 1700000001000, level: 'warn', source: 'dsh-todo-board', logger: 'dsh-todo-board', detail: '派发失败[no-session] id=abc' },
+  { sn: 30, ts: 1700000002000, level: 'error', source: 'dsh-todo-board', logger: 'dsh-todo-board', detail: '新建会话失败：boom' },
+  { sn: 40, ts: 1700000003000, level: 'error', source: 'dsh-mcp-client', logger: 'dsh-mcp-client', detail: 'other plugin failed' },
+  { sn: 50, ts: 1700000004000, level: 'debug', source: 'dsh-todo-board', logger: 'dsh-todo-board', detail: 'debug detail' },
+]
+
+/** Every `since` the panel has asked for, so cursor behaviour is assertable. */
+const logRequests = []
+const logInfo = { cursor: 50, truncated: false, dropped: 0, file: 'D:\\DSH\\dsh-home\\todo-board\\log.ndjson', fileOff: false, fileError: '', fileBytes: 123 }
+
+/**
+ * When set, the stubbed host answers like the harness gate with no browser
+ * session: 401. Used once, at the end, to check the panel explains that refusal.
+ */
+let unauthorized = false
+
 globalThis.fetch = async (url, options) => {
+  const target = String(url)
+  if (unauthorized) return { ok: false, status: 401, json: async () => ({ ok: false }) }
+  if (target.includes('logs=1')) {
+    const since = Number(new URL('http://x' + target).searchParams.get('since'))
+    logRequests.push(Number.isFinite(since) ? since : -1)
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        todos: snapshot.todos,
+        logAlert: { sn: 30, at: 1700000002000 },
+        logs: { ...logInfo, since, lines: logLines.filter((line) => line.sn > since) },
+      }),
+    }
+  }
   if (options !== undefined && typeof options.body === 'string') {
     try {
       calls.push(JSON.parse(options.body))
@@ -212,6 +367,8 @@ globalThis.fetch = async (url, options) => {
       calls.push({ unparseable: options.body })
     }
   }
+  // Returns the SAME object, not a copy: the suite mutates `snapshot.todos`
+  // between polls to model a board that changed under the panel.
   return { ok: true, status: 200, json: async () => snapshot }
 }
 
@@ -233,6 +390,20 @@ const exports_ = factory((name) => {
   throw new Error('unexpected require: ' + name)
 })
 assert.equal(exports_.name, 'dsh-todo-board')
+
+// The footer prints this marker so a running browser can prove which build it
+// loaded, which is the first question whenever a UI change "does not show up".
+// It is bumped by hand, so it drifts from package.json silently — that already
+// happened once. The footer is only useful if the two agree, so they are tied
+// together here rather than trusted.
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+const buildMarker = readFileSync(clientUrl, 'utf8').match(/const BUILD = '([^']+)'/)
+assert.ok(buildMarker !== null, 'the client half declares a build marker')
+assert.equal(
+  buildMarker[1],
+  pkg.version,
+  'the client build marker matches package.json (footer would otherwise lie about which build is live)',
+)
 
 // ------------------------------------------------------------ render tree
 
@@ -758,5 +929,692 @@ assert.ok(
   'an empty board says so instead of naming a task',
 )
 console.log('empty   OK')
+
+// -- switchable skins ------------------------------------------------------
+//
+// Three looks, one cycle control in the title bar. What the tests pin down is
+// what can silently rot: that a switch actually reaches the DOM attribute the
+// stylesheets are scoped by, that it is remembered, that it survives parking the
+// panel, and that an id no longer shipped falls back instead of leaving the
+// panel wearing nothing.
+
+snapshot.todos = [todo({ id: 'a', title: '下一条要做的', order: 0 })]
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+
+const skinRoot = () => findByClass(tree, 'dshtb-root')[0]
+const skinButton = () => findByClass(tree, 'dshtb-skin')[0]
+
+// The previous test parks the panel to check the empty line, so start from the
+// expanded state the title-bar control lives in.
+const parkedButton = findByClass(tree, 'dshtb-pill')[0]
+if (parkedButton !== undefined) tree = click(parkedButton)
+assert.ok(findByClass(tree, 'dshtb-card')[0] !== undefined, 'the panel is expanded to test the skin control')
+
+assert.equal(skinRoot().props['data-dshtb-skin'], 'ticket', 'the default skin is the ticket look')
+assert.ok(skinButton() !== undefined, 'the title bar carries the skin control')
+
+// The control must not be confused with the fold control: they are separate
+// buttons in the same row, and nothing may find one while looking for the other.
+assert.equal(findByClass(tree, 'dshtb-fold').length, 1, 'the fold control is still its own button')
+
+const firstGlyph = textOf(skinButton())
+tree = click(skinButton())
+assert.equal(skinRoot().props['data-dshtb-skin'], 'plain', 'clicking steps to the second skin')
+assert.notEqual(textOf(skinButton()), firstGlyph, 'the control shows which skin is now on')
+assert.equal(storage.get('dsh.todoBoard.skin.v1'), 'plain', 'the choice is persisted')
+
+tree = click(skinButton())
+assert.equal(skinRoot().props['data-dshtb-skin'], 'dense', 'clicking again steps to the third skin')
+
+tree = click(skinButton())
+assert.equal(skinRoot().props['data-dshtb-skin'], 'ticket', 'and the cycle wraps to the default')
+
+// The tooltip has to name the skin it is about to leave, or the button is a
+// guess. It is read from the same table the cycle walks.
+tree = click(skinButton())
+assert.ok(
+  skinButton().props.title.includes('素白'),
+  'the tooltip names the active skin: ' + skinButton().props.title,
+)
+assert.ok(
+  skinButton().props.title.includes('素白') && skinButton().props['aria-label'].includes('素白'),
+  'and the accessible name agrees with the tooltip',
+)
+
+// Parking the panel must not drop the skin: it is the same panel.
+tree = click(findByClass(tree, 'dshtb-fold')[0])
+assert.equal(findByClass(tree, 'dshtb-card').length, 0, 'the panel is parked')
+assert.equal(
+  skinRoot().props['data-dshtb-skin'],
+  'plain',
+  'the parked line wears the same skin as the expanded panel',
+)
+
+// A reload picks the stored skin back up...
+storage.set('dsh.todoBoard.skin.v1', 'dense')
+tree = remount()
+assert.equal(skinRoot().props['data-dshtb-skin'], 'dense', 'a stored skin is restored on mount')
+
+// ...and an id this build no longer ships falls back rather than applying
+// nothing (which would leave the panel with no skin rules at all).
+storage.set('dsh.todoBoard.skin.v1', 'a-skin-that-was-removed')
+tree = remount()
+assert.equal(skinRoot().props['data-dshtb-skin'], 'ticket', 'an unknown stored skin falls back')
+
+storage.delete('dsh.todoBoard.skin.v1')
+tree = remount()
+assert.equal(skinRoot().props['data-dshtb-skin'], 'ticket', 'and an absent one uses the default')
+console.log('skins   OK')
+
+// -- the skins are stylesheets, and every one of them is actually injected --
+//
+// The attribute above proves which skin is *selected*; it says nothing about
+// whether the rules for it exist on the page. A skin whose block was never
+// injected still sets the attribute and still reports its name — and renders
+// the default look, which is precisely the failure that would look like "the
+// switch does nothing" rather than like a bug.
+
+assert.ok(
+  headStyles.some((node) => node.getAttribute('data-dsh-todo-board-skin') === 'plain'),
+  'the plain skin stylesheet is injected',
+)
+assert.ok(
+  headStyles.some((node) => node.getAttribute('data-dsh-todo-board-skin') === 'dense'),
+  'the dense skin stylesheet is injected',
+)
+assert.ok(
+  headStyles.some((node) => node.getAttribute('data-dsh-todo-board') === ''),
+  'the base stylesheet is injected',
+)
+
+// The three looks must be three looks, not one block registered twice: the two
+// optional sheets have to differ from each other and from the base.
+const sheetOf = (id) =>
+  (headStyles.find((node) => node.getAttribute('data-dsh-todo-board-skin') === id) || {}).textContent
+assert.notEqual(sheetOf('plain'), sheetOf('dense'), 'the two optional skins are different sheets')
+
+// Every rule in an optional sheet must be scoped to its own skin, or selecting
+// one skin would restyle the others — and, worse, anything a scoped selector
+// missed would leak out of the panel onto the rest of the GUI.
+for (const id of ['plain', 'dense']) {
+  // Comments are stripped first: they carry prose (and punctuation) that a
+  // brace-splitting scan would otherwise read as part of a selector.
+  const body = sheetOf(id).replace(/\/\*[\s\S]*?\*\//g, '')
+  const rules = body.split('}').filter((chunk) => chunk.includes('{'))
+  assert.ok(rules.length > 0, 'the ' + id + ' sheet has rules')
+  for (const rule of rules) {
+    const selector = rule.split('{')[0].trim()
+    assert.ok(
+      selector.includes('[data-dshtb-skin="' + id + '"]'),
+      'every ' + id + ' rule is scoped to its own skin: ' + selector,
+    )
+    assert.ok(
+      selector.startsWith('.dshtb-root'),
+      'and none of them can escape the panel: ' + selector,
+    )
+  }
+}
+console.log('skincss OK')
+
+// -- a skin may restyle text, never delete it ------------------------------
+//
+// `font-size:0` and `display:none` are how a stylesheet silently removes a
+// label, and no tree-walking test above can see it: the node is still in the
+// tree, still has its text, and renders blank. Two rules matter most, because
+// each is the only place its fact is stated — a section header is what a folded
+// section is hiding, and a group heading is the directory a row belongs to.
+
+const labelRules = []
+for (const id of ['plain', 'dense']) {
+  const body = sheetOf(id).replace(/\/\*[\s\S]*?\*\//g, '')
+  for (const rule of body.split('}').filter((chunk) => chunk.includes('{'))) {
+    const [selector, declarations] = [rule.split('{')[0].trim(), rule.split('{')[1] || '']
+    // Only rules aimed at a label-bearing node are checked; a rule that hides a
+    // decorative ::after or a resize grip is not hiding information.
+    const labelBearing =
+      /\.dshtb-(sect|group|t|facts|empty|title)(?![\w-])/.test(selector) &&
+      selector.includes('::after') === false
+    if (labelBearing) labelRules.push({ id, selector, declarations })
+  }
+}
+
+assert.ok(labelRules.length > 0, 'the skins do restyle label-bearing nodes')
+for (const rule of labelRules) {
+  assert.ok(
+    /font-size\s*:\s*0(?![.\d])/.test(rule.declarations) === false,
+    'skin ' + rule.id + ' must not set font-size:0 on a label: ' + rule.selector,
+  )
+  assert.ok(
+    /display\s*:\s*none/.test(rule.declarations) === false,
+    'skin ' + rule.id + ' must not remove a label outright: ' + rule.selector,
+  )
+}
+console.log('skintext OK')
+
+// -- pasting images into the composer --------------------------------------
+//
+// Images are attached by pasting into the composer; the file-picker button is
+// gone. The contract that matters is not "images get attached" but *when the
+// paste is intercepted*: a text paste must reach the textarea untouched, or the
+// main way of writing a task breaks in order to support a side one.
+
+snapshot.todos = [todo({ id: 'a', title: '下一条要做的', order: 0 })]
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = remount()
+const composer = () => findByClass(tree, 'dshtb-add')[0].children.find((c) => c.type === 'textarea')
+/** The panel's per-todo image cap. Must match `MAX_IMAGES` in client.js. */
+const MAX_IMAGES = 4
+const pasteInto = (clipboard) => {
+  const event = pasteEvent(clipboard)
+  composer().props.onPaste(event)
+  return event
+}
+
+assert.equal(typeof composer().props.onPaste, 'function', 'the composer handles paste')
+assert.ok(
+  composer().props.placeholder.includes('Ctrl+V'),
+  'and says so, since there is no picker button left to discover: ' + composer().props.placeholder,
+)
+
+// The picker button is gone, nothing else offers a file input, and no standing
+// hint occupies the composer while nothing is attached: the capability is named
+// by the placeholder, and the attachment area appears only once it has content.
+assert.equal(
+  findByClass(tree, 'dshtb-attach').length,
+  0,
+  'the attachment area is absent while nothing is attached (no standing hint)',
+)
+assert.equal(
+  findByText(tree, '截图后在这里').length,
+  0,
+  'the removed hint text does not come back',
+)
+assert.ok(
+  findByText(tree, 'PNG/JPG/WebP/GIF').length === 0,
+  'and neither does its format blurb in the composer',
+)
+assert.equal(
+  findByText(tree, '📎').length,
+  0,
+  'and no picker label survives anywhere in the panel',
+)
+assert.equal(
+  findByClass(tree, 'dshtb-add')[0].children.filter((c) => c.type === 'input').length,
+  0,
+  'and nothing offers a file input',
+)
+
+// A text paste must not be intercepted.
+const textPaste = pasteInto(textClipboard('just some words'))
+assert.equal(textPaste.defaultPrevented, false, 'a text paste is NOT intercepted')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 0, 'and attaches nothing')
+
+// An image paste is intercepted and becomes a thumbnail.
+const oneImage = pasteInto(imageClipboard([imageFile('shot.png', 'image/png')]))
+assert.equal(oneImage.defaultPrevented, true, 'an image paste IS intercepted')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 1, 'the pasted image becomes a thumbnail')
+
+// Removing the standing hint must not remove the counter: that is the thing
+// that carries information once something IS attached, and it is now the only
+// on-screen statement of the limit.
+assert.equal(
+  findByClass(tree, 'dshtb-attach').length,
+  1,
+  'the attachment area appears once an image is attached',
+)
+assert.ok(
+  textOf(findByClass(tree, 'dshtb-attach')[0]).includes('已附 1 / ' + MAX_IMAGES + ' 张'),
+  'and the counter reports how many of the limit are used: ' +
+    textOf(findByClass(tree, 'dshtb-attach')[0]),
+)
+
+// Every format the control advertises must still be accepted: the hint was the
+// only place those four extensions were named, so removing it is exactly the
+// change that could quietly take the support with it.
+for (const [name, type, expected] of [
+  ['a.PNG', 'image/png', 'data:image/png;base64,'],
+  ['b.jpg', 'image/jpeg', 'data:image/jpeg;base64,'],
+  ['c.webp', 'image/webp', 'data:image/webp;base64,'],
+  ['d.gif', 'image/gif', 'data:image/gif;base64,'],
+]) {
+  // A fresh composer per case, so each one stands alone and none of them leaves
+  // attachments behind for the test that follows.
+  tree = remount()
+  const event = pasteInto(imageClipboard([{ name, type, __base64: 'QUJD' }]))
+  assert.equal(event.defaultPrevented, true, name + ' is accepted as an image')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  tree = render()
+  const thumbs = findByClass(tree, 'dshtb-thumb')
+  assert.equal(thumbs.length, 1, name + ' attaches exactly one image')
+  assert.equal(
+    thumbs[0].children.find((c) => c.type === 'img').props.src,
+    expected + 'QUJD',
+    name + ' keeps its media type through paste',
+  )
+}
+
+// The extension fallback must survive case and a four-letter extension, since
+// it is the only thing standing between a typeless clipboard image and a host
+// refusal.
+for (const [name, expected] of [
+  ['x.jpeg', 'data:image/jpeg;base64,'],
+  ['y.JPEG', 'data:image/jpeg;base64,'],
+]) {
+  tree = remount()
+  const event = pasteInto(imageClipboard([{ name, type: '', __base64: 'QUJD' }]))
+  assert.equal(event.defaultPrevented, true, 'a typeless ' + name + ' is still an image')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  tree = render()
+  const thumbs = findByClass(tree, 'dshtb-thumb')
+  assert.equal(thumbs.length, 1, 'a typeless ' + name + ' attaches')
+  assert.equal(
+    thumbs[0].children.find((c) => c.type === 'img').props.src,
+    expected + 'QUJD',
+    'and resolves its media type from the extension',
+  )
+}
+
+// Leave the composer empty for the tests that follow.
+tree = remount()
+
+// A pasted image with no MIME type must still carry a usable one: the host
+// validates strictly and would refuse an undeclared media type outright. A
+// typed image is pasted first so this also pins that a typeless one joins it
+// rather than replacing it.
+pasteInto(imageClipboard([imageFile('typed.png', 'image/png')]))
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 1, 'the typed image is attached first')
+
+const typeless = pasteInto(imageClipboard([{ name: 'screenshot.png', type: '', __base64: 'QUJD' }]))
+assert.equal(typeless.defaultPrevented, true, 'a typeless image paste is still an image paste')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+const thumbs = findByClass(tree, 'dshtb-thumb')
+assert.equal(thumbs.length, 2, 'the typeless image is attached too — it does not replace the first')
+const srcs = thumbs.map((t) => t.children.find((c) => c.type === 'img').props.src)
+assert.ok(
+  srcs.some((src) => src.startsWith('data:image/png;base64,')),
+  'a typeless clipboard image is sent with the media type its name implies: ' + JSON.stringify(srcs),
+)
+
+// Text pasted alongside an image on the same payload is not treated as an image.
+tree = remount()
+const mixed = pasteInto({
+  files: [imageFile('mixed.png', 'image/png')],
+  items: [
+    { kind: 'string', type: 'text/plain', getAsFile: () => null },
+    { kind: 'file', type: 'image/png', getAsFile: () => imageFile('mixed.png', 'image/png') },
+  ],
+})
+assert.equal(mixed.defaultPrevented, true, 'an image on the payload still counts as an image paste')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 1, 'and exactly one image is attached')
+
+// A non-image file paste is left alone: it is not this panel's to consume.
+tree = remount()
+const notImage = pasteInto(imageClipboard([{ name: 'notes.pdf', type: 'application/pdf' }]))
+assert.equal(notImage.defaultPrevented, false, 'a non-image file paste is NOT intercepted')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 0, 'and attaches nothing')
+
+// A file with no type and an extension the host does not admit is refused
+// rather than forwarded to fail host-side.
+const unknownExt = pasteInto(imageClipboard([{ name: 'mystery.bmp', type: '' }]))
+assert.equal(unknownExt.defaultPrevented, false, 'an unadmitted extension is not treated as an image')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 0, 'and attaches nothing')
+console.log('paste   OK')
+
+// -- the attachment limit is enforced on paste -----------------------------
+
+tree = remount()
+// Fill to the limit, then paste one more.
+const room = MAX_IMAGES
+const fill = pasteInto(imageClipboard([imageFile('a.png', 'image/png'), imageFile('b.png', 'image/png'), imageFile('c.png', 'image/png'), imageFile('d.png', 'image/png')]))
+assert.equal(fill.defaultPrevented, true, 'a full batch paste is intercepted')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, room, 'all ' + room + ' images attached')
+
+const overLimit = pasteInto(imageClipboard([imageFile('e.png', 'image/png')]))
+assert.equal(overLimit.defaultPrevented, true, 'pasting past the limit is still intercepted')
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(
+  findByClass(tree, 'dshtb-thumb').length,
+  room,
+  'and the extra image is not attached — the limit holds',
+)
+assert.ok(
+  textOf(tree).includes('最多带 ' + room + ' 张'),
+  'and the panel says why nothing was attached: ' + textOf(findByClass(tree, 'dshtb-err')[0] || { children: [] }),
+)
+
+// A batch that overflows a partially-filled composer attaches what fits and
+// says so, rather than silently dropping the rest or refusing the paste.
+tree = remount()
+pasteInto(imageClipboard([imageFile('1.png', 'image/png'), imageFile('2.png', 'image/png')]))
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, 2, 'two images attached first')
+pasteInto(imageClipboard([
+  imageFile('3.png', 'image/png'),
+  imageFile('4.png', 'image/png'),
+  imageFile('5.png', 'image/png'),
+]))
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(findByClass(tree, 'dshtb-thumb').length, room, 'a partial batch fills the remaining room')
+assert.ok(
+  textOf(tree).includes('只粘贴了前 2 张'),
+  'and the panel reports how many it took: ' + textOf(findByClass(tree, 'dshtb-err')[0] || { children: [] }),
+)
+
+// The pasted bytes must reach the board: the whole point of attaching them is
+// that they ride along with the todo when it is created.
+const beforeAdd = calls.length
+composer().props.onChange({ target: { value: '带粘贴图片的待办' } })
+tree = render()
+// The add control is the button inside the composer row, not whatever ancestor
+// happens to contain the glyph first.
+const addButton = findByClass(tree, 'dshtb-add')[0].children.find(
+  (child) => child.type === 'button' && textOf(child) === '\uFF0B',
+)
+assert.ok(addButton !== undefined, 'the composer offers an add control')
+click(addButton)
+await new Promise((resolve) => setTimeout(resolve, 0))
+const created = calls[calls.length - 1]
+assert.equal(calls.length, beforeAdd + 1, 'adding sends exactly one request')
+assert.equal(created.action, 'create', 'through the create action')
+assert.equal(created.images.length, room, 'carrying every pasted image: ' + created.images.length)
+assert.ok(
+  created.images.every((image) => typeof image.data === 'string' && image.data !== '' && typeof image.mediaType === 'string' && image.mediaType !== ''),
+  'each with the base64 payload and a declared media type the host admits',
+)
+console.log('pastelimit OK')
+
+// ------------------------------------------------------------- log view
+//
+// The log is a developer surface that must stay out of a normal user's way,
+// while still being reachable the moment something breaks. Three properties
+// carry that, and each is asserted here because each can regress invisibly:
+//
+//   1. the board view never requests log content;
+//   2. the button advertises itself only when an error/warn is unread;
+//   3. opening it shows records, filters them, and can export them.
+
+tree = remount()
+assert.equal(logRequests.length, 0, 'the board view never asks the host for log content')
+
+// The button carries no dot while nothing has gone wrong that the user has not
+// seen; a permanently-lit dot would be noise and would stop meaning anything.
+const logButton = () => findByClass(tree, 'dshtb-log').filter((node) => node.type === 'button')[0]
+assert.ok(logButton() !== undefined, 'the title bar carries a log control')
+assert.equal(
+  findByClass(tree, 'dshtb-dot').length,
+  0,
+  'no dot before anything has been acknowledged-vs-unread',
+)
+
+// Opening the view fetches immediately rather than waiting up to a full poll.
+tree = click(logButton())
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.ok(logRequests.length >= 1, 'opening the log view asks the host for records')
+assert.equal(logRequests[0], 0, 'the first request asks from the beginning')
+assert.equal(findByClass(tree, 'dshtb-logview').length, 1, 'the log page replaces the board')
+assert.equal(findByClass(tree, 'dshtb-add').length, 0, 'and the composer is not rendered behind it')
+
+// Default filters: error+warn, own plugin only. That is what the dot points at.
+const logRows = () => findByClass(tree, 'dshtb-logrow')
+const rowText = () => logRows().map((row) => textOf(row)).join('\n')
+assert.ok(logRows().length > 0, 'records are listed')
+assert.ok(rowText().includes('新建会话失败'), 'the error is shown')
+assert.ok(rowText().includes('派发失败'), 'so is the warn')
+assert.ok(!rowText().includes('启动完成'), 'info is filtered out by default')
+assert.ok(!rowText().includes('debug detail'), 'debug is filtered out by default')
+assert.ok(
+  !rowText().includes('other plugin failed'),
+  'another plugin\'s record is hidden while the source filter is 「本插件」',
+)
+
+// **The poll must keep feeding the OPEN view.** The interval is installed once
+// on mount, so anything it reads has to see the CURRENT state — a stale
+// `logOpen` closure leaves the page frozen at whatever the open-effect fetched,
+// which looks like a working viewer that simply never shows anything new. The
+// shim's interval is captured rather than fired, so this drives it by hand.
+// The LAST registered callback belongs to the current mount (earlier mounts
+// registered their own, and this suite remounts many times).
+//
+// This runs before the filter assertions below because it appends a record; the
+// fixture those assertions describe is the one captured so far.
+const tick = intervals[intervals.length - 1]
+assert.equal(typeof tick, 'function', 'the panel installs a polling interval')
+const beforeTick = logRequests.length
+const newestBefore = logLines[logLines.length - 1].sn
+logLines.push({
+  sn: 60,
+  ts: 1700000005000,
+  level: 'error',
+  source: 'dsh-todo-board',
+  logger: 'dsh-todo-board',
+  detail: 'arrived while the log view was open',
+})
+tick()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.ok(
+  logRequests.length > beforeTick,
+  'the poll keeps fetching logs while the view is open (a stale closure would stop here)',
+)
+assert.equal(
+  logRequests[logRequests.length - 1],
+  newestBefore,
+  'and asks from the newest cursor it already holds, not from zero',
+)
+assert.ok(
+  textOf(tree).includes('arrived while the log view was open'),
+  'so a record that arrives while the page is open shows up on the next tick',
+)
+assert.ok(
+  textOf(logRows()[0]).includes('arrived while the log view was open'),
+  'and it lands at the top, like every other newest record',
+)
+// Drop it again, so the ordering assertion below still describes the base fixture.
+logLines.pop()
+tree = remount()
+tree = click(logButton())
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+
+// Newest first: the thing that just broke should be at the top without scrolling.
+assert.ok(
+  textOf(logRows()[0]).includes('新建会话失败'),
+  'the newest matching record is first',
+)
+
+// Level filters are additive toggles.
+const errorButton = () =>
+  findByClass(tree, 'dshtb-logbar')[0].children.find(
+    (child) => child.type === 'button' && textOf(child) === 'error',
+  )
+const infoButton = () =>
+  findByClass(tree, 'dshtb-logbar')[0].children.find(
+    (child) => child.type === 'button' && textOf(child) === 'info',
+  )
+tree = click(infoButton())
+assert.ok(rowText().includes('启动完成'), 'turning on info adds info records')
+tree = click(errorButton())
+assert.ok(!rowText().includes('新建会话失败'), 'turning off error removes error records')
+assert.ok(rowText().includes('派发失败'), 'while the untouched level stays on')
+
+// Every level off would be indistinguishable from "nothing was logged", so the
+// last one cannot be switched off. Narrow down to exactly one level first:
+// `error` was just turned off and `info` is on, so this leaves only `warn`.
+tree = click(infoButton())
+assert.ok(rowText().includes('派发失败'), 'warn still shows with info off again')
+assert.ok(!rowText().includes('启动完成'), 'and info is gone again')
+tree = click(
+  findByClass(tree, 'dshtb-logbar')[0].children.find(
+    (child) => child.type === 'button' && textOf(child) === 'warn',
+  ),
+)
+assert.ok(rowText().includes('派发失败'), 'the last remaining level cannot be switched off')
+tree = click(errorButton())
+tree = click(infoButton())
+
+// The source toggle cycles 本插件 -> 其他插件 -> 全部 -> 本插件.
+const sourceButton = () =>
+  findByClass(tree, 'dshtb-logbar')[0].children.find(
+    (child) => child.type === 'button' && /本插件|其他插件|全部/.test(textOf(child)),
+  )
+tree = click(sourceButton())
+assert.equal(textOf(sourceButton()), '其他插件', 'the source toggle advances')
+assert.ok(rowText().includes('other plugin failed'), 'other plugins\' records are reachable')
+assert.ok(!rowText().includes('派发失败'), 'and ours are excluded in that mode')
+tree = click(sourceButton())
+assert.equal(textOf(sourceButton()), '全部', 'the toggle reaches 全部')
+assert.ok(rowText().includes('other plugin failed') && rowText().includes('派发失败'), '全部 shows both')
+tree = click(sourceButton())
+assert.equal(textOf(sourceButton()), '本插件', 'and cycles back to our own records')
+assert.equal(
+  storage.get('dsh.todoBoard.logSource.v1'),
+  'self',
+  'the chosen source is remembered for next time',
+)
+
+// The keyword filter narrows within the active levels and source.
+tree = click(infoButton())
+const queryBox = findByClass(tree, 'dshtb-logfilter')[0]
+queryBox.props.onChange({ target: { value: 'never-matches-this' } })
+tree = render()
+assert.equal(logRows().length, 0, 'a non-matching keyword empties the list')
+assert.ok(
+  textOf(tree).includes('当前筛选下没有记录'),
+  'and the empty state explains it is the filter, not a lack of logs',
+)
+queryBox.props.onChange({ target: { value: '派发' } })
+tree = render()
+assert.equal(logRows().length, 1, 'a matching keyword narrows to the matching record')
+queryBox.props.onChange({ target: { value: '' } })
+tree = render()
+
+// The dot: lit for an unread error, cleared by opening the view. This is the
+// whole "tell the developer without bothering the user" contract.
+tree = remount()
+tree = click(logButton())
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+tree = click(logButton()) // close again
+assert.equal(findByClass(tree, 'dshtb-logview').length, 0, 'the view closes back to the board')
+assert.equal(
+  findByClass(tree, 'dshtb-dot').length,
+  0,
+  'reading the log clears the dot — it does not stay lit forever',
+)
+
+// The copy and export paths are assembled client-side, so they get real stubs
+// rather than a test-only hook: what matters is that clicking 复制 puts the
+// VISIBLE records on the clipboard, and that the file carries a header saying
+// what it is.
+const copied = []
+// Node 24 ships a read-only `navigator`, so this must be defined rather than
+// assigned — an assignment throws only on newer runtimes, which would make the
+// suite's behaviour depend on the Node version.
+Object.defineProperty(globalThis, 'navigator', {
+  value: { clipboard: { writeText: (value) => (copied.push(value), Promise.resolve()) } },
+  configurable: true,
+  writable: true,
+})
+globalThis.Blob = class {
+  constructor(parts) {
+    this.parts = parts
+  }
+}
+globalThis.URL.createObjectURL = () => 'blob:stub'
+globalThis.URL.revokeObjectURL = () => {}
+
+tree = remount()
+tree = click(logButton())
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+
+const barButton = (label) =>
+  findByClass(tree, 'dshtb-logbar')
+    .flatMap((bar) => bar.children)
+    .find((child) => child.type === 'button' && textOf(child) === label)
+
+const beforeCopy = copied.length
+assert.ok(barButton('复制') !== undefined, 'the log view offers a copy control')
+tree = click(barButton('复制'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(copied.length, beforeCopy + 1, 'copying puts text on the clipboard')
+const clip = copied[copied.length - 1]
+assert.ok(clip.includes('新建会话失败'), 'the copied text carries the records on screen')
+assert.ok(!clip.includes('启动完成'), 'and respects the active filters, like the list does')
+assert.ok(clip.includes('# dsh-todo-board 日志'), 'the copied text is labelled with what it is')
+assert.ok(
+  clip.includes('请自行确认'),
+  'and warns that it may contain paths and other plugins\' context before being shared',
+)
+
+assert.ok(barButton('导出') !== undefined, 'the log view offers an export control')
+const beforeExport = downloads.length
+tree = click(barButton('导出'))
+assert.equal(downloads.length, beforeExport + 1, 'exporting produces a download')
+assert.ok(
+  downloads[downloads.length - 1].filename.endsWith('.txt'),
+  'the export is a .txt named for the plugin: ' + downloads[downloads.length - 1].filename,
+)
+
+// Clearing the panel's own view must be local: a diagnostic surface that
+// deleted the host's evidence would be a trap.
+tree = click(barButton('清空显示'))
+assert.equal(logRows().length, 0, 'clearing empties the visible list')
+assert.ok(
+  textOf(tree).includes('清空本面板显示'),
+  'and says the clearing was local to the panel',
+)
+
+console.log('logs    OK')
+
+// -- v0.9.1: a refused poll explains itself ----------------------------------
+//
+// The board route now borrows the harness' own gate, which wants the browser
+// session cookie DSH issues when you open the URL `dsh web` prints. A missing
+// cookie is therefore the one new refusal a user can actually hit, and "HTTP
+// 401" on its own would leave the panel looking broken with nothing to act on —
+// the failure mode this plugin keeps insisting must name its own cause.
+
+unauthorized = true
+tree = remount()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+const refusal = textOf(findByClass(tree, 'dshtb-err')[0] || { children: [] })
+assert.ok(refusal.includes('401'), 'a refused poll is reported to the user: ' + refusal)
+assert.ok(
+  refusal.includes('token') && refusal.includes('dsh web'),
+  'and names the fix instead of leaving a bare status code: ' + refusal,
+)
+
+unauthorized = false
+tree = remount()
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
+assert.equal(
+  findByClass(tree, 'dshtb-err').length,
+  0,
+  'and the notice clears as soon as the gate lets the panel back in',
+)
+console.log('refuse  OK')
 
 console.log('\nall browser-half smoke checks passed')

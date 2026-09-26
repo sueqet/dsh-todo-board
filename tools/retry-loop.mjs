@@ -106,6 +106,9 @@ async function postJson(payload) {
   const chunks = [Buffer.from(JSON.stringify(payload), 'utf8')]
   const request = {
     method: 'POST',
+    // The route's trust fence refuses a request with no `Host` — the
+    // DNS-rebinding check — so a browser-shaped stub must carry one.
+    headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },

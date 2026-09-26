@@ -1,5 +1,5 @@
 /**
- * Mutation check for the row-facts and row-schedule tests.
+ * Mutation check for the row-facts, row-schedule, skin and paste tests.
  *
  * Confirms `client-smoke.mjs` really fails when each behaviour is reverted:
  *
@@ -7,6 +7,27 @@
  *   2. the schedule is repeated in the facts line (same, other direction)
  *   3. an unscheduled row loses its way to add a time
  *   4. editing sends nothing (the picker is decorative)
+ *   5. pending rows fall silent again (a state you must infer)
+ *   6. done rows fall silent again (same, other state)
+ *   7. the skin control stops remembering the choice
+ *   8. the skin control stops reaching the DOM attribute the sheets hook onto
+ *   9. a skin erases the section label instead of restyling it
+ *  10. a skin's rules escape the panel and restyle the whole GUI
+ *  11. one of the two optional skins is never injected
+ *  12. a text paste is swallowed (the composer's main input breaks)
+ *  13. an image paste is not intercepted (the image never attaches)
+ *  14. a typeless clipboard image keeps its empty media type
+ *  15. the per-todo image limit is not enforced on paste
+ *  16. a non-image file paste is consumed by mistake
+ *  17. the client build marker drifts from package.json (the footer lies)
+ *  18. the removed standing hint comes back into the composer
+ *  19. the attachment counter disappears once an image is attached
+ *  20. the board view starts pulling log content (logs leak to every user)
+ *  21. the log view stops fetching when it opens (the button looks dead)
+ *  22. the log dot never clears (it stops meaning "something is wrong")
+ *  23. every log level can be switched off (empty reads as "nothing logged")
+ *  24. the log poll reads `logOpen` from a stale closure (the open view freezes)
+ *  25. a refused poll reports a bare status code (nothing to act on)
  *
  * Patterns are matched against a normalized (LF) copy because the working tree
  * is checked out with CRLF on Windows, then the replacement is mapped back onto
@@ -30,6 +51,19 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const p = join(ROOT, 'client', 'client.js')
 const original = fs.readFileSync(p, 'utf8')
+
+/**
+ * The live build marker, read from the source instead of written out here.
+ *
+ * Hard-coding it made mutant 17 report "pattern not found" on every release
+ * bump, which reads as a broken guard rather than a moved target — and a guard
+ * that skips quietly is worse than no guard.
+ */
+const buildMarker = /const BUILD = '([^']+)'/.exec(original.replace(/\r\n/g, '\n'))
+if (buildMarker === null) {
+  console.error('cannot find the client build marker in client/client.js')
+  process.exit(2)
+}
 
 function restore() {
   try {
@@ -83,6 +117,108 @@ const mutants = [
     name: 'done rows go silent again (state must be inferred)',
     from: "      meta.push(h('span', { className: 'dshtb-chip ' + chip.cls, key: 's', title }, chip.label))",
     to: "      if (state !== 'done') meta.push(h('span', { className: 'dshtb-chip ' + chip.cls, key: 's', title }, chip.label))",
+  },
+  {
+    name: 'the skin choice is not remembered',
+    from: "      const next = SKINS[(at + 1) % SKINS.length].id\n      saveSkin(next)\n      return next",
+    to: "      const next = SKINS[(at + 1) % SKINS.length].id\n      return next",
+  },
+  {
+    name: 'the skin never reaches the stylesheets’ hook attribute',
+    from: "    { className: 'dshtb-root', 'data-dshtb-skin': skin, style: rootStyle },",
+    to: "    { className: 'dshtb-root', style: rootStyle },",
+  },
+  {
+    name: 'a skin erases the section label instead of restyling it',
+    from: "  letter-spacing:0;text-transform:none;padding:10px 14px 4px;gap:5px;\n  font:600 11.5px/1 ${MONO}}",
+    to: "  font-size:0;letter-spacing:0;text-transform:none;padding:10px 14px 4px;gap:5px}",
+  },
+  {
+    name: 'a skin rule escapes the panel onto the rest of the GUI',
+    from: '.dshtb-root[data-dshtb-skin="dense"] .dshtb-ic{width:19px;height:19px;font-size:10px}',
+    to: '.dshtb-ic{width:19px;height:19px;font-size:10px}',
+  },
+  {
+    name: 'one of the two optional skins is never injected',
+    from: "  for (const id of Object.keys(SKIN_CSS)) {",
+    to: "  for (const id of Object.keys(SKIN_CSS).slice(0, 1)) {",
+  },
+  {
+    name: 'a text paste is swallowed (the composer’s main input is broken)',
+    from: "    const files = clipboardImages(event.clipboardData)\n    if (files.length === 0) return",
+    to: "    const files = clipboardImages(event.clipboardData)\n    if (files.length === 0) { event.preventDefault(); return }",
+  },
+  {
+    name: 'an image paste is not intercepted (the image never attaches)',
+    from: "    event.preventDefault()\n    if (pending.length >= MAX_IMAGES) {",
+    to: "    if (pending.length >= MAX_IMAGES) {",
+  },
+  {
+    name: 'a typeless clipboard image keeps its empty media type',
+    from: "    if (typeof file.type === 'string' && file.type !== '') return file.type",
+    to: "    if (typeof file.type === 'string') return file.type",
+  },
+  {
+    name: 'the per-todo image limit is not enforced on paste',
+    from: "    if (pending.length >= MAX_IMAGES) {\n      setErr('一条待办最多带 ' + MAX_IMAGES + ' 张图片，先移除一张再粘贴')\n      return\n    }",
+    to: "    if (false) {\n      setErr('一条待办最多带 ' + MAX_IMAGES + ' 张图片，先移除一张再粘贴')\n      return\n    }",
+  },
+  {
+    name: 'a non-image file paste is consumed by mistake',
+    from: "    return typeof file.type === 'string' && file.type === '' && imageMediaType(file) !== ''",
+    to: "    return true",
+  },
+  {
+    name: 'the build marker drifts from the package version',
+    from: `const BUILD = '${buildMarker[1]}'`,
+    to: "const BUILD = '0.0.0-stale'",
+  },
+  {
+    name: 'the removed standing hint comes back into the composer',
+    from: "              pending.length === 0\n                ? null\n                : h(\n                    'div',\n                    { className: 'dshtb-attach' },",
+    to: "              pending.length === 0\n                ? h('div', { className: 'dshtb-hint' }, '截图后在这里 Ctrl+V 直接粘贴成附图（最多 4 张，PNG/JPG/WebP/GIF）')\n                : h(\n                    'div',\n                    { className: 'dshtb-attach' },",
+  },
+  {
+    name: 'the attachment counter disappears once an image is attached',
+    from: "                  '已附 ' + pending.length + ' / ' + MAX_IMAGES + ' 张 · 点缩略图移除',",
+    to: "                  '',",
+  },
+  {
+    name: 'the board view starts pulling log content (logs leak to every user)',
+    from: "    if (logOpen) refreshLogs()",
+    to: "    refreshLogs()",
+  },
+  {
+    name: 'the log view stops fetching when it opens (the button looks dead)',
+    from: '    logOpenRef.current = logOpen\n    if (logOpen) refreshLogs()',
+    to: '    logOpenRef.current = logOpen\n    if (false) refreshLogs()',
+  },
+  {
+    name: 'the log dot never clears (it stops meaning \"something is wrong\")',
+    from: "  const logAlert = !logOpen && alertSn > logSeenRef.current && alertSn > 0",
+    to: "  const logAlert = alertSn > 0",
+  },
+  {
+    name: 'every log level can be switched off (empty reads as \"nothing logged\")',
+    from: "      if (!LOG_LEVELS.some((id) => next[id] === true)) return current",
+    to: "      if (false) return current",
+  },
+  {
+    name: 'the log poll reads logOpen from a stale closure (the open view freezes)',
+    from: '    if (logOpenRef.current) refreshLogs()',
+    to: '    if (logOpen) refreshLogs()',
+  },
+  {
+    // v0.9.1: the board route borrows the harness gate, so a missing browser
+    // session is a refusal a user can actually hit. Reporting it as a bare
+    // status code leaves the panel looking broken with nothing to act on.
+    name: 'a refused poll reports a bare status code (nothing to act on)',
+    from:
+      "  if (status === 401) {\n" +
+      "    return 'HTTP 401 —— 浏览器没有 DSH 会话凭据。请用 `dsh web` 打印的那条带 token 的地址重开页面'\n" +
+      '  }\n' +
+      "  return 'HTTP ' + status",
+    to: "  return 'HTTP ' + status",
   },
 ]
 

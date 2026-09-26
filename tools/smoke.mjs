@@ -20,6 +20,15 @@ const mod = await import('../lib/index.js')
 
 const registered = { tool: null, section: null, routes: [], listeners: [], effects: [] }
 
+/**
+ * What `ctx.get('connection')` finds — the harness' Host Connection gate.
+ *
+ * `undefined` models a deployment without `dsh-client-connection`, which is the
+ * only case where the restated fence is the one in charge. The convergence
+ * cases near the end of this file swap a stand-in in.
+ */
+let connectionService
+
 const DIR = 'D:\\smoke\\project'
 const agent = {
   id: 'session-smoke',
@@ -129,6 +138,42 @@ const workspaceStub = {
   },
 }
 
+/**
+ * A faithful-enough stand-in for `ctx.logger`.
+ *
+ * It reproduces the two facts the plugin's log sink depends on: `exporter()`
+ * registers a sink, and an exporter gates by ITS OWN `levels` map before the
+ * logger's default — the rule at `cordis/src/logger.ts:155`. Modelling the
+ * gate matters here, because getting it wrong is exactly how the built-in
+ * buffer silently loses `warn` and `debug`.
+ */
+function makeLogger() {
+  const exporters = []
+  let sn = 0
+  const LEVEL = { error: 0, info: 1, warn: 2, debug: 3 }
+  const logger = {
+    calls: [],
+    exporter(exporter) {
+      exporters.push(exporter)
+      return () => {}
+    },
+    record(type, args) {
+      logger.calls.push({ type, args })
+      const level = LEVEL[type]
+      for (const exporter of exporters) {
+        const target = exporter.levels?.['dsh-todo-board'] ?? exporter.levels?.default ?? LEVEL.info
+        if (target < level) continue
+        sn += 1
+        exporter.export({ sn, ts: Date.now(), type, level, name: 'dsh-todo-board', args })
+      }
+    },
+  }
+  for (const type of Object.keys(LEVEL)) logger[type] = (...args) => logger.record(type, args)
+  return logger
+}
+
+const loggerStub = makeLogger()
+
 function makeCtx() {
   // `inject(['webServer'], cb)` hands cb a context where the service is a
   // property, so the stub exposes it both ways.
@@ -163,6 +208,7 @@ function makeCtx() {
       if (key === 'attachments') return attachmentsStub
       if (key === 'workspaceRegistry') return workspaceStub
       if (key === 'webServer') return webServer
+      if (key === 'connection') return connectionService
       return undefined
     },
     on(event, listener) {
@@ -177,7 +223,7 @@ function makeCtx() {
     inject(names, callback) {
       callback(ctx)
     },
-    logger: { error() {} },
+    logger: loggerStub,
   }
   return ctx
 }
@@ -193,6 +239,18 @@ function fakeResponse() {
       box.body = body === undefined ? '' : String(body)
     },
   }
+}
+
+/**
+ * Headers every real browser sends. The route's trust fence refuses a request
+ * with no `Host` (that is the DNS-rebinding check), so a stub that omits them
+ * is not modelling the browser the panel actually runs in.
+ */
+const BROWSER_HEADERS = { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' }
+
+/** Where the plugin keeps its durable log, beside the board file. */
+function boardLogPath() {
+  return join(home, 'todo-board', 'log.ndjson')
 }
 
 /** Local `YYYY-MM-DDTHH:mm`, the board's schedule format. */
@@ -243,6 +301,75 @@ assert.ok(
 assert.ok(existsSync(join(home, 'todo-board', 'board.json')), 'board file created on first load')
 console.log('apply()  OK')
 
+// -------------------------------------------------------- approval (the gate)
+//
+// The gate is what makes "the AI asks before it changes the board" a mechanism
+// rather than a prompt convention, so its exact allowlist is asserted here:
+// a read and the model's own checkbox pass, every other write asks — INCLUDING
+// an action this version does not know, which must fail closed rather than slip
+// through a forgotten `if`.
+
+const gateEntry = registered.listeners.find((entry) => entry.event === 'tools/pre-execute')
+assert.ok(gateEntry !== undefined, 'the tools/pre-execute gate is registered')
+
+/** Run the gate over one model call; returns the decision or 'allow'. */
+function gate(action, extra) {
+  let allowed = false
+  const decision = gateEntry.listener(
+    { name: 'todo_board', arguments: action === undefined ? undefined : { action, ...extra } },
+    () => {
+      allowed = true
+      return Promise.resolve({ kind: 'allow' })
+    },
+  )
+  return allowed ? 'allow' : decision
+}
+
+for (const action of ['list', 'done', 'reopen']) {
+  assert.equal(gate(action, { id: 'x' }), 'allow', action + ' is not gated')
+}
+for (const [action, extra] of [
+  ['add', { title: 'AI 自建的一条', mode: 'resume' }],
+  ['note', { id: 'x', note: 'n' }],
+  ['schedule', { id: 'x', schedule: '2030-01-01T00:00' }],
+  ['update', { id: 'x' }],
+  ['reorder', {}],
+  ['dispatch', { id: 'x' }],
+  ['something-new', {}],
+]) {
+  const decision = gate(action, extra)
+  assert.equal(decision.kind, 'ask', action + ' asks before writing')
+  assert.ok(
+    typeof decision.reason === 'string' && decision.reason.includes('待办板'),
+    action + ' carries a reason the approval dialog can show',
+  )
+}
+assert.ok(
+  gate('add', { title: 'AI 自建的一条', mode: 'resume' }).reason.includes('resume') &&
+    gate('add', { title: 'AI 自建的一条', mode: 'resume' }).reason.includes('自动派发'),
+  'the add reason names the mode, so an auto-run row cannot be approved unnoticed',
+)
+// The dialog is where a person decides, so the reason has to carry the specific
+// facts of THIS call — not just the action's name.
+assert.ok(
+  gate('update', { id: 'x', title: '新标题', mode: 'resume' }).reason.includes('模式 resume'),
+  'the update reason lists the fields being changed',
+)
+assert.ok(
+  gate('reorder', { ids: ['a', 'b'] }).reason.includes('2 条'),
+  'the reorder reason says how many rows move',
+)
+assert.equal(gate(undefined, {}), 'allow', 'a malformed call defaults to list, exactly like the tool body')
+
+// Another plugin's tools are none of our business: the gate must pass them on.
+let passedOn = false
+gateEntry.listener({ name: 'pwsh', arguments: { command: 'echo hi' } }, () => {
+  passedOn = true
+  return Promise.resolve({ kind: 'allow' })
+})
+assert.ok(passedOn, 'a foreign tool call goes straight to the next listener')
+console.log('gate    OK')
+
 // --------------------------------------------------------------- tool: add
 
 const added = await registered.tool.execute(
@@ -279,6 +406,7 @@ async function postJson(payload) {
   const chunks = [Buffer.from(JSON.stringify(payload), 'utf8')]
   const request = {
     method: 'POST',
+    headers: BROWSER_HEADERS,
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },
@@ -310,7 +438,7 @@ assert.ok(notFound.message.includes('找不到'))
 // -------------------------------------------------------- route: GET + patch
 
 const getResponse = fakeResponse()
-await apiRoute.handler({ method: 'GET' }, getResponse)
+await apiRoute.handler({ method: 'GET', headers: BROWSER_HEADERS }, getResponse)
 const snapshot2 = JSON.parse(getResponse.box.body)
 assert.equal(snapshot2.ok, true)
 assert.equal(snapshot2.todos.length, 2)
@@ -450,7 +578,7 @@ assert.equal(attached[0].sessionId, spawnedAgents[0].id)
 assert.equal(attached[0].path, DIR, 'the workspace is the todo directory')
 
 const snapshotResponse = fakeResponse()
-await apiRoute.handler({ method: 'GET' }, snapshotResponse)
+await apiRoute.handler({ method: 'GET', headers: BROWSER_HEADERS }, snapshotResponse)
 const panelRow = JSON.parse(snapshotResponse.box.body).todos.find((todo) => todo.id === boundId)
 assert.equal(panelRow.runSessionId, spawnedAgents[0].id, 'the created session is bound on the row')
 
@@ -521,7 +649,10 @@ const imageResponse = {
     this.body = body
   },
 }
-await imageRoute.handler({ method: 'GET', url: '/dsh-todo-board/image?id=' + ref.attachmentId }, imageResponse)
+await imageRoute.handler(
+  { method: 'GET', url: '/dsh-todo-board/image?id=' + ref.attachmentId, headers: BROWSER_HEADERS },
+  imageResponse,
+)
 assert.equal(imageResponse.status, 200, 'a referenced attachment is served')
 assert.equal(imageResponse.headers['content-type'], 'image/png')
 assert.ok(Buffer.from(imageResponse.body).length > 0, 'the served bytes are non-empty')
@@ -533,7 +664,10 @@ const missingResponse = {
   },
   end() {},
 }
-await imageRoute.handler({ method: 'GET', url: '/dsh-todo-board/image?id=att-nope' }, missingResponse)
+await imageRoute.handler(
+  { method: 'GET', url: '/dsh-todo-board/image?id=att-nope', headers: BROWSER_HEADERS },
+  missingResponse,
+)
 assert.equal(missingResponse.status, 404, 'an unreferenced id is not readable')
 
 // Dispatch turns the attached image into a real image block.
@@ -583,7 +717,7 @@ assert.equal(orphanRun.lost, true, 'and says the row is stranded')
 /** The panel's own view of one row, straight from the GET route. */
 async function readRow(id) {
   const response = fakeResponse()
-  await apiRoute.handler({ method: 'GET' }, response)
+  await apiRoute.handler({ method: 'GET', headers: BROWSER_HEADERS }, response)
   return JSON.parse(response.box.body).todos.find((todo) => todo.id === id)
 }
 
@@ -701,6 +835,507 @@ assert.ok(
   'and its next automatic attempt is a minute away, not a tick away',
 )
 console.log('stranded OK')
+
+// ------------------------------------------------------------ request trust
+//
+// The route is outside the harness' `/api` channel, so the harness' own fence
+// does not cover it and this plugin restates the rule. These cases are the
+// regression test for that: without them a later refactor can drop the fence
+// and every other check in this file still passes.
+
+async function readStatus(route, request) {
+  const response = fakeResponse()
+  await route.handler(request, response)
+  return response.box.status
+}
+
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.1:3080' } }),
+  200,
+  'loopback Host is served',
+)
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: 'localhost:3080' } }),
+  200,
+  'localhost is loopback too',
+)
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.2:3080' } }),
+  200,
+  'the whole 127/8 block counts as loopback',
+)
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET' }),
+  403,
+  'a request with no Host is refused — over plain HTTP a browser sends no Origin on reads, so Host is the one header rebinding cannot forge',
+)
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: 'evil.example:3080' } }),
+  403,
+  'a rebound attacker domain is refused',
+)
+assert.equal(
+  await readStatus(apiRoute, {
+    method: 'GET',
+    headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' },
+  }),
+  403,
+  'a cross-site fetch is refused even on a loopback Host',
+)
+assert.equal(
+  await readStatus(apiRoute, {
+    method: 'GET',
+    headers: { host: '127.0.0.1:3080', origin: 'http://evil.example' },
+  }),
+  403,
+  'a foreign Origin is refused',
+)
+assert.equal(
+  await readStatus(apiRoute, {
+    method: 'GET',
+    headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' },
+  }),
+  200,
+  'a same-origin browser request is served',
+)
+assert.equal(
+  await readStatus(imageRoute, { method: 'GET', url: '/dsh-todo-board/image?id=x' }),
+  403,
+  'the image route carries the same fence',
+)
+
+// The POST body is JSON, but a cross-site form/fetch can post `text/plain`
+// without a CORS preflight — which is exactly why the fence, not the
+// content-type, has to be what stops it.
+const crossSitePost = fakeResponse()
+await apiRoute.handler(
+  {
+    method: 'POST',
+    headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify({ action: 'clearVerified' }), 'utf8')
+    },
+  },
+  crossSitePost,
+)
+assert.equal(crossSitePost.box.status, 403, 'a preflight-free cross-site POST cannot mutate the board')
+console.log('trust   OK')
+
+// --------------------------------------------------------- channel convergence
+//
+// Every assertion above runs WITHOUT a `connection` service, so they double as
+// the fallback's regression test: a deployment that has no
+// `dsh-client-connection` still gets the restated fence. What they cannot show
+// is the branch that matters in this one — the harness' own gate (Host/Origin
+// AND browser authentication) deciding instead, which is the half that stops a
+// local process from writing the board behind the approval gate's back.
+
+connectionService = undefined
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.1:3080' } }),
+  200,
+  'the fallback fence serves when no connection service exists',
+)
+
+const gateSaw = []
+connectionService = {
+  requestRejection(request) {
+    gateSaw.push(request.headers?.host ?? '')
+    return 401
+  },
+}
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.1:3080' } }),
+  401,
+  'a request the local fence would allow is refused once the harness gate decides',
+)
+assert.equal(gateSaw.length, 1, 'the harness gate is the one that was asked')
+assert.equal(gateSaw[0], '127.0.0.1:3080', 'and it saw the real request')
+
+connectionService = { requestRejection: () => undefined }
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.1:3080' } }),
+  200,
+  'a gate that allows still serves — this is the branch the panel lives on',
+)
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: 'evil.example' } }),
+  200,
+  'the harness gate is trusted wholesale: we do not re-judge its verdict',
+)
+
+// A gate that throws must refuse, not take the route down with it.
+connectionService = {
+  requestRejection() {
+    throw new Error('gate exploded')
+  },
+}
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.1:3080' } }),
+  403,
+  'a throwing gate fails closed',
+)
+
+// Back to the default: later sections drive the routes expecting the fallback,
+// and a stand-in gate left installed would answer all of them.
+connectionService = undefined
+assert.equal(
+  await readStatus(apiRoute, { method: 'GET', headers: { host: '127.0.0.1:3080' } }),
+  200,
+  'withdrawing the service restores the restated fence',
+)
+console.log('conn    OK')
+
+// ------------------------------------------------------------------- logs
+//
+// The log view is a developer surface, so its two load-bearing rules get
+// asserted directly rather than through the panel: nothing leaves the host
+// while the view is closed, and stored lines are redacted.
+
+const plainSnapshot = JSON.parse(
+  (await (async () => {
+    const response = fakeResponse()
+    await apiRoute.handler({ method: 'GET', headers: BROWSER_HEADERS }, response)
+    return response.box.body
+  })()),
+)
+assert.equal(plainSnapshot.logs, undefined, 'the idle poll ships no log content')
+assert.ok(plainSnapshot.logAlert !== undefined, 'but it does ship the alert cursor the button dot needs')
+assert.equal(typeof plainSnapshot.logAlert.sn, 'number')
+
+// A dispatch failure is the case the whole feature exists for: it must leave a
+// record, because the row only keeps a one-line reason.
+const logged = await (async () => {
+  const response = fakeResponse()
+  await apiRoute.handler(
+    { method: 'GET', url: '/dsh-todo-board/api?logs=1&since=0', headers: BROWSER_HEADERS },
+    response,
+  )
+  return JSON.parse(response.box.body)
+})()
+assert.ok(logged.logs !== undefined, 'the log view can ask for records')
+assert.ok(Array.isArray(logged.logs.lines), 'and gets a list')
+assert.ok(logged.logs.lines.length > 0, 'the stranded-dispatch failures above were recorded')
+assert.ok(
+  logged.logs.lines.some((line) => line.detail.includes('派发失败')),
+  'a parked dispatch is among them — the row alone would not say why',
+)
+assert.ok(
+  logged.logs.lines.every((line) => typeof line.level === 'string' && typeof line.detail === 'string'),
+  'every record carries a level and a detail',
+)
+assert.ok(
+  logged.logs.lines.every((line) => line.detail.length <= 4000),
+  'no single record can be unbounded',
+)
+assert.equal(logged.logs.fileOff, false, 'the log file was writable in this run')
+assert.ok(existsSync(logged.logs.file), 'and records reached the durable file')
+const savedLines = readFileSync(logged.logs.file, 'utf8').trim().split('\n')
+assert.ok(savedLines.length > 0, 'the file is NDJSON with content')
+assert.ok(
+  savedLines.every((line) => {
+    try {
+      JSON.parse(line)
+      return true
+    } catch (err) {
+      return false
+    }
+  }),
+  'every file line is independently parseable — one record cannot forge another',
+)
+
+// The cursor is a real filter, so a poll does not resend what the panel has.
+const cursorProbe = await (async () => {
+  const response = fakeResponse()
+  await apiRoute.handler(
+    {
+      method: 'GET',
+      url: '/dsh-todo-board/api?logs=1&since=' + logged.logs.cursor,
+      headers: BROWSER_HEADERS,
+    },
+    response,
+  )
+  return JSON.parse(response.box.body)
+})()
+assert.equal(cursorProbe.logs.lines.length, 0, 'asking from the newest cursor returns nothing new')
+
+// ------------------------------------------------------- redaction (承重)
+//
+// Redaction is a bearing structure, not hardening (see
+// `docs/design-log-view.md` §3.2, which reproduced four leak paths). It has to
+// run on every record's write path, so these drive it through the real sink —
+// a unit test on a helper would not prove the sink calls it.
+//
+// The rule the spike established: a leaked key never arrives from a careless
+// `logger.warn(secret)`; it arrives inside a message someone ELSE composed,
+// usually an `Error.message` from config validation. So the payloads below are
+// shaped like those, not like a deliberate secret dump.
+
+const SECRETS = {
+  openai: 'sk-live-REALKEY0123456789abcdef',
+  context7: 'ctx7sk-297eea2b-b489-4b3e-b92d-20cb6d5f4bc4',
+  github: 'ghp_ABCdef0123456789ABCdef0123456789',
+  npm: 'npm_ABCdef0123456789ABCdef0123456789',
+}
+
+// Shape 1: `dsh-mcp-client`'s Config is a `z.union`, and schemastery
+// JSON.stringifies the WHOLE received value when a union fails — every env
+// token and Authorization header in one message. This shape has a live instance
+// on this machine.
+loggerStub.error(
+  new Error(
+    'expected {…} | {…} but got {"transport":"bogus","serverName":"github",' +
+      '"headers":{"Authorization":"Bearer ' + SECRETS.openai + '"},' +
+      '"env":{"GH_TOKEN":"' + SECRETS.openai + '"}}',
+  ),
+)
+// Shape 2: a scalar config value echoed back under its own key.
+loggerStub.warn(new Error('$.apiKey expected string but got ' + SECRETS.openai))
+// Shape 3: `credentialRef()` echoes its ARGUMENT, which is whatever the user
+// pasted — no `sk-` prefix guaranteed, which is why a prefix rule alone fails.
+loggerStub.error(
+  new Error('credential ref "' + SECRETS.context7 + '" must match /^[A-Za-z_][A-Za-z0-9_]*$/'),
+)
+// Shape 4: a non-Error `cause` is delivered as its OWN record (verified), so
+// redaction must be applied per record rather than once to the thrown error.
+loggerStub.error(new Error('wrapper failed', { cause: { apiKey: SECRETS.openai } }))
+// Shape 5: log injection — a newline in a payload must not forge a record.
+loggerStub.warn('benign prefix\n{"level":"error","detail":"forged"}\u0000\u0007')
+// Shape 6: a bare secret in prose. Isolates the PREFIX rule: nothing here is
+// under a secret-looking key or behind `Bearer`, so only `sk-…` can catch it.
+// Asserted separately because overlapping rules mask each other's markers — in
+// the shapes above, `sk-…` is first rewritten and then folded into `Bearer ***`.
+loggerStub.warn('upstream said the token is stale: ' + SECRETS.openai)
+
+const secretProbe = await (async () => {
+  const response = fakeResponse()
+  await apiRoute.handler(
+    { method: 'GET', url: '/dsh-todo-board/api?logs=1&since=0', headers: BROWSER_HEADERS },
+    response,
+  )
+  return JSON.parse(response.box.body).logs.lines
+})()
+
+const rawFile = readFileSync(boardLogPath(), 'utf8')
+for (const [name, value] of Object.entries(SECRETS)) {
+  assert.ok(
+    !secretProbe.some((line) => line.detail.includes(value)),
+    'no record served to the panel contains the ' + name + ' secret',
+  )
+  assert.ok(!rawFile.includes(value), 'and the on-disk log does not contain the ' + name + ' secret either')
+}
+assert.ok(
+  secretProbe.some((line) => line.detail.includes('stale: sk-***')),
+  'a bare secret in prose is masked by the prefix rule',
+)
+assert.ok(
+  secretProbe.some((line) => line.detail.includes('"Authorization":"***"')),
+  'an Authorization header is masked',
+)
+// The bearer rule on its own, with no secret-looking key in front of it.
+loggerStub.warn('the api wants bearer ' + SECRETS.openai)
+const bearerProbe = await (async () => {
+  const response = fakeResponse()
+  await apiRoute.handler(
+    { method: 'GET', url: '/dsh-todo-board/api?logs=1&since=0', headers: BROWSER_HEADERS },
+    response,
+  )
+  return JSON.parse(response.box.body).logs.lines
+})()
+assert.ok(
+  bearerProbe.some((line) => line.detail.includes('Bearer ***')),
+  'a bearer token with no key in front is masked by the bearer rule',
+)
+// Rules overlap on purpose, so assert the invariant that matters — the secret
+// is gone — rather than each rule's exact wording.
+assert.ok(
+  bearerProbe.every((line) => !line.detail.includes(SECRETS.openai)),
+  'no rule ordering leaves the secret behind',
+)
+assert.ok(
+  secretProbe.some((line) => line.detail.includes('credential ref "***"')),
+  'the value-position rule covers the no-prefix key that a prefix rule cannot (ctx7sk-…)',
+)
+assert.ok(
+  secretProbe.some((line) => line.detail.includes('"GH_TOKEN":"***"')),
+  'a JSON dump keeps its structure while the secret under the key is masked',
+)
+assert.ok(
+  secretProbe.every((line) => !line.detail.includes('\u0000')),
+  'control characters are stripped, so a payload cannot corrupt the view',
+)
+// Log injection is about the FILE, not the detail text: a newline inside a
+// payload is fine (stacks need them) as long as it cannot terminate the NDJSON
+// record. Read the file fresh — the earlier `savedLines` predates these writes.
+const injectionLines = readFileSync(boardLogPath(), 'utf8').trim().split('\n')
+assert.equal(
+  injectionLines.filter((line) => line.includes('forged')).length,
+  1,
+  'a newline inside a payload did not forge a second record',
+)
+assert.ok(
+  injectionLines.every((line) => {
+    try {
+      JSON.parse(line)
+      return true
+    } catch (err) {
+      return false
+    }
+  }),
+  'every file line still parses after an injection attempt',
+)
+
+// An `Error` first argument must keep its stack: a diagnostic log without one
+// loses half its value, and `String(err)` would flatten it to `Error: msg`.
+loggerStub.error(new Error('stack please'))
+const stackProbe = await (async () => {
+  const response = fakeResponse()
+  await apiRoute.handler(
+    { method: 'GET', url: '/dsh-todo-board/api?logs=1&since=0', headers: BROWSER_HEADERS },
+    response,
+  )
+  return JSON.parse(response.box.body).logs.lines
+})()
+assert.ok(
+  stackProbe.some((line) => line.detail.includes('stack please') && line.detail.includes('at ')),
+  'an Error argument is rendered with its stack, not as "Error: msg"',
+)
+
+// Placeholders are RAW in `Message.args` (verified), so the sink must format
+// them itself; otherwise `logger.warn('code=%s', v)` stores a literal `%s`.
+loggerStub.warn('placeholder %s and %d and %o', 'ABC', 42, { k: 1 })
+const formatProbe = await (async () => {
+  const response = fakeResponse()
+  await apiRoute.handler(
+    { method: 'GET', url: '/dsh-todo-board/api?logs=1&since=0', headers: BROWSER_HEADERS },
+    response,
+  )
+  return JSON.parse(response.box.body).logs.lines
+})()
+assert.ok(
+  formatProbe.some((line) => line.detail.includes('placeholder ABC and 42 and {"k":1}')),
+  'placeholders are resolved by our own formatter',
+)
+assert.ok(
+  !formatProbe.some((line) => line.detail.includes('%s and')),
+  'and no unparsed placeholder is left behind',
+)
+console.log('redact  OK')
+
+// ------------------------------------------------- tool: model-side actions
+//
+// `update` / `reorder` / `dispatch` close the gap the panel used to own alone:
+// the model could create a row but not edit, order, or start one. All three are
+// writes, so all three sit behind the approval gate (asserted above), and all
+// three reuse the panel's own code (`reorderTodos`, `runTodo` → `dispatch`), so
+// what is asserted here is the CONTRACT: what the model may say, what it is
+// refused, and that a refusal changes nothing at all.
+
+const ACTIONS_DIR = 'D:\\smoke\\actions'
+
+for (const title of ['动作 A', '动作 B', '动作 C']) {
+  await registered.tool.execute({ action: 'add', title, dir: ACTIONS_DIR, mode: 'resume' }, exec)
+}
+const actionRows = async () =>
+  (await registered.tool.execute({ action: 'list', dir: ACTIONS_DIR }, exec)).todos
+
+const seeded = await actionRows()
+assert.equal(seeded.length, 3, 'three rows seeded in their own directory')
+const [idA, idB, idC] = seeded.map((row) => row.id)
+
+// -- update: the four editable fields, and nothing half-applied ---------------
+
+const renamed = await registered.tool.execute(
+  { action: 'update', id: idA, title: '动作 A（改）', mode: 'newSession', note: '改过的备注' },
+  exec,
+)
+assert.ok(renamed.message.includes('已更新'), 'update reports what it did: ' + renamed.message)
+assert.equal(renamed.todos[0].title, '动作 A（改）')
+assert.equal(renamed.todos[0].mode, 'newSession', 'the mode moved')
+assert.equal(renamed.todos[0].schedule, '', 'update does not silently touch the schedule')
+
+// A bad field refuses the WHOLE request: half-applying would leave both the
+// model and the user who approved it unable to say what actually changed.
+const badMode = await registered.tool.execute(
+  { action: 'update', id: idA, title: '不该生效的新标题', mode: 'teleport' },
+  exec,
+)
+assert.ok(badMode.message.includes('mode'), 'an unknown mode is refused: ' + badMode.message)
+assert.equal((await actionRows())[0].title, '动作 A（改）', 'and the valid half did NOT land')
+
+const emptyUpdate = await registered.tool.execute({ action: 'update', id: idA }, exec)
+assert.ok(
+  emptyUpdate.message.includes('至少'),
+  'an update that changes nothing says so: ' + emptyUpdate.message,
+)
+
+const noteCleared = await registered.tool.execute({ action: 'update', id: idA, note: '' }, exec)
+assert.ok(noteCleared.message.includes('清空'), 'an empty note clears it: ' + noteCleared.message)
+
+// -- reorder: one directory, explicit ids, and refusals that change nothing ---
+
+const moved = await registered.tool.execute({ action: 'reorder', ids: [idC, idA, idB] }, exec)
+assert.ok(moved.message.includes('已调整顺序'), 'reorder reports the new order: ' + moved.message)
+assert.deepEqual(
+  (await actionRows()).map((row) => row.id),
+  [idC, idA, idB],
+  'and the board reads back in exactly that order',
+)
+
+// A row from another directory makes the list cross-directory — refused whole,
+// because the panel groups by directory and each queue moves on its own.
+await registered.tool.execute({ action: 'add', title: '别的目录的一条', dir: DIR }, exec)
+const otherDirId = (await registered.tool.execute({ action: 'list', all: true }, exec)).todos.find(
+  (row) => row.title === '别的目录的一条',
+).id
+const crossDir = await registered.tool.execute({ action: 'reorder', ids: [idB, otherDirId] }, exec)
+assert.ok(
+  crossDir.message.includes('同一个目录'),
+  'a cross-directory reorder is refused: ' + crossDir.message,
+)
+assert.deepEqual(
+  (await actionRows()).map((row) => row.id),
+  [idC, idA, idB],
+  'and the refused reorder moved nothing',
+)
+
+const unknownId = await registered.tool.execute({ action: 'reorder', ids: [idB, 'no-such-id'] }, exec)
+assert.ok(unknownId.message.includes('找不到'), 'an id that does not exist is named: ' + unknownId.message)
+assert.deepEqual((await actionRows()).map((row) => row.id), [idC, idA, idB], 'and nothing moved')
+
+// -- dispatch: starts a row, and refuses one that is already out there --------
+
+const beforeDispatch = agent.sent.length
+const dispatched = await registered.tool.execute({ action: 'dispatch', id: idB }, exec)
+assert.ok(dispatched.message.includes('已派发'), 'dispatch reports the target: ' + dispatched.message)
+assert.equal(agent.sent.length, beforeDispatch + 1, 'the task landed in the calling session')
+assert.ok(
+  agent.sent[beforeDispatch].content[0].text.includes('动作 B'),
+  'and it is that todo, not another one',
+)
+assert.equal(dispatched.todos[0].state, 'dispatched', 'the row now reads as dispatched')
+
+const again = await registered.tool.execute({ action: 'dispatch', id: idB }, exec)
+assert.ok(
+  again.message.includes('未派发') && again.message.includes('已派发'),
+  'a second dispatch of the same row is refused with its current state: ' + again.message,
+)
+assert.equal(agent.sent.length, beforeDispatch + 1, 'and it sent nothing')
+
+await registered.tool.execute({ action: 'done', id: idC }, exec)
+const doneDispatch = await registered.tool.execute({ action: 'dispatch', id: idC }, exec)
+assert.ok(
+  doneDispatch.message.includes('已完成'),
+  'a finished row is not dispatchable either: ' + doneDispatch.message,
+)
+assert.equal(agent.sent.length, beforeDispatch + 1, 'and that sent nothing too')
+
+assert.equal(
+  (await registered.tool.execute({ action: 'dispatch', id: 'nope' }, exec)).message.includes('找不到'),
+  true,
+  'an unknown id is reported, not thrown',
+)
+console.log('actions OK')
 
 rmSync(home, { recursive: true, force: true })
 console.log('\nall host-half smoke checks passed')
