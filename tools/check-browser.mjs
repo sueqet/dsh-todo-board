@@ -170,7 +170,7 @@ UNBROKEN-${'z'.repeat(160)}</div>
           </div>
         </div>
       </div>
-      <div class="dshtb-foot"><span>v0.11.2</span><button class="dshtb-link">清理</button></div>
+      <div class="dshtb-foot"><span>v0.11.3</span><button class="dshtb-link">清理</button></div>
     </div>\`
   host.appendChild(root)
   return root

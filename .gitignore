@@ -3,6 +3,9 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# npm working cache, used when the system cache directory is not writable
+.npm-cache/
+
 # dsh local state
 .dsh-todo-board.json
 board.json

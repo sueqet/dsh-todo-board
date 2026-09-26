@@ -59,9 +59,9 @@ dsh plugin --profile web remove dsh-todo-board
 
 ### DSH 版本要求 / DSH version requirement
 
-**本插件 0.11.2 起要求 DSH ≥ 0.1.7-rc.2（session format v4）。**
+**本插件 0.11.3 起要求 DSH ≥ 0.1.7-rc.2（session format v4）。**
 
-**As of 0.11.2 this plugin requires DSH ≥ 0.1.7-rc.2 (session format v4).**
+**As of 0.11.3 this plugin requires DSH ≥ 0.1.7-rc.2 (session format v4).**
 
 | 你的 DSH | 装哪个版本 / Install | 为什么 / Why |
 | --- | --- | --- |
@@ -72,7 +72,17 @@ dsh plugin --profile web remove dsh-todo-board
 
 The messages this plugin injects carry a **producer-owned source** (`{ kind: 'plugin:dsh-todo-board', form: 'notice' }`). Session format **v4** requires exactly that; the retired v3 wrapper `{ kind: 'plugin', plugin: … }` is refused, and the refusal **fails the whole turn**, not just the notice.
 
-`package.json` 的 `engines.dsh` 已写成 `>=0.1.7-rc.2`，装错版本时 npm 会在**安装时**给出警告，而不是等到回合跑起来才报错。反过来，**≤ 0.11.1 在 DSH ≥ 0.1.7 上不能用**。
+> **装错版本没有安装期告警 —— 这是实测的，不是推测。** `package.json` 里的 `engines.dsh` 只是一个**声明**：npm 只校验它认识的引擎名（`node` / `npm`），自定义引擎名不参与检查。实测在 DSH 0.1.5 / 0.1.6 下安装本插件，**不会有** `EBADENGINE` 警告。所以上表请自己对着看。
+>
+> **No install-time warning fires for a mismatched version — measured, not assumed.** `engines.dsh` is a **declaration only**: npm validates the engine names it knows (`node`, `npm`), and a custom name is not checked. Installing this plugin against DSH 0.1.5 / 0.1.6 produces **no** `EBADENGINE` warning.
+>
+> 装错版本的**实际表现是运行时报错，而且报得很直白**：DSH ≥ 0.1.7 会拒绝我们写出的消息，DSH ≤ 0.1.6 那边则没有 v4 的那套校验，两条路都会**带着整个回合一起失败**，原因会写进插件日志。
+>
+> A mismatch shows up as a **runtime failure of the whole turn**, with the reason in the plugin log.
+
+旧版本（**≤ 0.11.2，含 npm 上发过的 0.4.1 / 0.5.0 / 0.6.1**）不会自动升级 —— 升级 DSH 之后请一并升级本插件。
+
+Releases up to **0.11.2** (including the published `0.4.1` / `0.5.0` / `0.6.1`) do not carry this adaptation: after upgrading DSH, upgrade the plugin too.
 
 ## 快速上手 / Quick start
 
