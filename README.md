@@ -59,9 +59,9 @@ dsh plugin --profile web remove dsh-todo-board
 
 ### DSH 版本要求 / DSH version requirement
 
-**本插件 0.11.3 起要求 DSH ≥ 0.1.7-rc.2（session format v4）。**
+**本插件 0.11.2 起要求 DSH ≥ 0.1.7-rc.2（session format v4）。**
 
-**As of 0.11.3 this plugin requires DSH ≥ 0.1.7-rc.2 (session format v4).**
+**As of 0.11.2 this plugin requires DSH ≥ 0.1.7-rc.2 (session format v4).**
 
 | 你的 DSH | 装哪个版本 / Install | 为什么 / Why |
 | --- | --- | --- |
@@ -80,9 +80,9 @@ The messages this plugin injects carry a **producer-owned source** (`{ kind: 'pl
 >
 > A mismatch shows up as a **runtime failure of the whole turn**, with the reason in the plugin log.
 
-旧版本（**≤ 0.11.2，含 npm 上发过的 0.4.1 / 0.5.0 / 0.6.1**）不会自动升级 —— 升级 DSH 之后请一并升级本插件。
+npm 上发布过、但**不带**这个适配的版本只有 **0.4.1 / 0.5.0 / 0.6.1**（它们写的是已退休的 v3 wrapper，在 DSH ≥ 0.1.7 上会让整个回合失败）；**0.11.2 是第一个带适配的发布版**。旧版本不会自动升级 —— 升级 DSH 之后请一并升级本插件。
 
-Releases up to **0.11.2** (including the published `0.4.1` / `0.5.0` / `0.6.1`) do not carry this adaptation: after upgrading DSH, upgrade the plugin too.
+The only **published** releases without this adaptation are **0.4.1 / 0.5.0 / 0.6.1** (they still write the retired v3 wrapper, which fails the whole turn on DSH ≥ 0.1.7); **0.11.2 was the first release with it**. Releases do not auto-upgrade: after upgrading DSH, upgrade the plugin too.
 
 ## 快速上手 / Quick start
 

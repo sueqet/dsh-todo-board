@@ -101,7 +101,7 @@ const SKINS = [
  * host and browser halves of one release are one build. `client-smoke.mjs` pins
  * the two together, because a footer that lies is worse than no footer.
  */
-const BUILD = '0.11.3'
+const BUILD = '0.11.4'
 
 /**
  * Severity filters in the log view, most severe first.
@@ -1015,8 +1015,23 @@ function foldable(options) {
 // --------------------------------------------------------------- component
 
 function TodoBoard(props) {
-  const currentId = props.useSessions((s) => s.current)
-  const currentSummary = props.useSessions((s) => (s.current === undefined ? undefined : s.byId[s.current]))
+  // The session list store is `{ ids, byId, phase, projectionsBySession }` — it
+  // has NO `current` key. Reading `s.current` therefore always yielded
+  // `undefined`, and BOTH `currentId` and `cwd` collapsed to `''`. That is what
+  // broke the scope tabs while the row labels stayed correct: the labels come
+  // from the host payload (`dirLabel`), whereas 「当前目录」 compared every row's
+  // `dir` against `''` (nothing can match) and 「当前会话」 compared
+  // `sourceSessionId` against `undefined`. Derive the current session the way the
+  // harness itself does — the summary the main view retains.
+  const currentSummary = props.useSessions((s) => {
+    const byId = s === undefined || s === null ? undefined : s.byId
+    if (byId === undefined || byId === null) return undefined
+    for (const row of Object.values(byId)) {
+      if (row !== null && typeof row === 'object' && ((row.retainedBy ?? {}).mainView ?? 0) > 0) return row
+    }
+    return undefined
+  })
+  const currentId = currentSummary === undefined || currentSummary === null ? undefined : currentSummary.id
   const cwd =
     currentSummary !== undefined && currentSummary !== null && typeof currentSummary.cwd === 'string'
       ? currentSummary.cwd

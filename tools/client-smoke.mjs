@@ -455,14 +455,43 @@ function findByText(node, needle) {
   return out
 }
 
+/**
+ * The session-list store, shaped the way the harness really sends it.
+ *
+ * `{ ids, byId, phase, projectionsBySession }` — there is **no** `current` key.
+ * This fixture used to spell one anyway, and that is why the scope tabs could be
+ * broken in the browser for several releases while this suite stayed green: the
+ * panel read `s.current`, which is `undefined` in production and `'s1'` here, so
+ * the fixture answered a question the real store never answers. A fixture that
+ * invents a field is worse than no fixture — it converts a live bug into a
+ * passing test.
+ *
+ * The current session is the row the main view **retains**, which is how the
+ * harness itself derives it (`dsh-client-ui-layout`, `-workspace`, `-cordis`,
+ * `-settings-general`, `-session` all scan for `retainedBy.mainView > 0`).
+ */
+function sessionsSnapshot() {
+  return {
+    ids: ['s2', 's1'],
+    byId: {
+      // Listed, but NO view retains it — and deliberately first, so "stop at the
+      // first row" is a distinguishable bug from "find the row the main view
+      // retains". With a single-session fixture those two are the same thing, and
+      // the test would pass for a reason it never checked.
+      s2: { id: 's2', cwd: 'D:\\somewhere\\else', title: '后台会话', retainedBy: {} },
+      s1: { id: 's1', cwd: CWD, title: '会话', retainedBy: { mainView: 1 } },
+    },
+    phase: 'ready',
+    projectionsBySession: {},
+  }
+}
+
 function render() {
   cursor = 0
   rendering = true
   let tree
   try {
-    tree = TodoBoard({
-      useSessions: (select) => select({ current: 's1', byId: { s1: { cwd: CWD, title: '会话' } } }),
-    })
+    tree = TodoBoard({ useSessions: (select) => select(sessionsSnapshot()) })
   } finally {
     rendering = false
   }
@@ -945,7 +974,66 @@ assert.equal(calls[calls.length - 1].patch.schedule, '', 'clearing sends an empt
 assert.equal(calls.length, beforeClear + 1, 'and sends exactly one request')
 console.log('rowsech OK')
 
+// -- the scope tabs actually scope ----------------------------------------
+//
+// The bug this exists for: `cwd` and `currentId` were both read off a store key
+// that does not exist (`s.current`), so they collapsed to `''` / `undefined`.
+// 「当前目录」 then compared every row's `dir` against `''`, and 「当前会话」
+// compared `sourceSessionId` against `undefined` — neither can ever match, so
+// both tabs listed nothing while the row labels (which come from the host
+// payload) kept showing the right directory. The fixture is what hid it: it
+// spelled a `current` field the real store never sends.
+//
+// So this test asserts on ROWS, not on chrome: a tab that is highlighted but
+// lists nothing is exactly the failure mode being guarded.
+snapshot.todos = [
+  todo({ id: 'both', title: '同目录同会话', order: 0 }),
+  todo({ id: 'dir', title: '同目录异会话', order: 1, sourceSessionId: 's2' }),
+  todo({
+    id: 'other',
+    title: '异目录同会话',
+    order: 2,
+    dir: 'd:\\elsewhere',
+    dirPath: 'D:\\elsewhere',
+  }),
+]
+await new Promise((resolve) => setTimeout(resolve, 0))
+tree = render()
 
+/** Row titles in the OPEN list. `dshtb-t` is the title node, so chips and facts cannot leak in. */
+const openTitles = () => findByClass(tree, 'dshtb-t').map(textOf)
+const scopeTab = (label) =>
+  findByClass(tree, 'dshtb-seg')[0].children.filter((node) => textOf(node).includes(label))[0]
+
+// The default tab is 「当前目录」, and it has to agree with what the rows say.
+assert.deepEqual(
+  openTitles(),
+  ['同目录同会话', '同目录异会话'],
+  'the default 「当前目录」 tab lists this directory\'s rows — not nothing, and not everything',
+)
+assert.ok(
+  textOf(scopeTab('当前目录')).includes('2'),
+  'and its count is this directory\'s, not zero',
+)
+
+tree = click(scopeTab('当前会话'))
+assert.deepEqual(
+  openTitles(),
+  ['同目录同会话', '异目录同会话'],
+  '「当前会话」 narrows by source session instead of matching nothing',
+)
+
+tree = click(scopeTab('全部'))
+assert.deepEqual(
+  openTitles(),
+  ['同目录同会话', '同目录异会话', '异目录同会话'],
+  '「全部」 is the union, so the two tabs above really were narrowing',
+)
+
+// Back to the default: the next section asserts on the 「当前目录」 empty wording.
+tree = click(scopeTab('当前目录'))
+assert.deepEqual(openTitles(), ['同目录同会话', '同目录异会话'], 'and the tabs still work after switching')
+console.log('scope   OK')
 
 snapshot.todos = [todo({ id: 'c', title: '已验收的', verified: true })]
 await new Promise((resolve) => setTimeout(resolve, 0))
@@ -1362,6 +1450,15 @@ await new Promise((resolve) => setTimeout(resolve, 0))
 const created = calls[calls.length - 1]
 assert.equal(calls.length, beforeAdd + 1, 'adding sends exactly one request')
 assert.equal(created.action, 'create', 'through the create action')
+// The same dead read that emptied the scope tabs also emptied these three: with
+// `cwd`/`currentId` collapsed, a row created from the panel was filed under NO
+// directory (`dir: ''`) and NO origin session — and that is PERSISTED, so the
+// row then never matches 「当前目录」, never shows a session chip, and has no
+// session to continue in. A code fix cannot repair rows already written, so it
+// has to be pinned at the boundary where they are written.
+assert.equal(created.dir, CWD, 'a row created with no directory typed is filed under the session cwd')
+assert.equal(created.sessionId, 's1', 'and carries the origin session it came from')
+assert.equal(created.sessionTitle, '会话', 'with that session\'s title, so the chip can name it')
 assert.equal(created.images.length, room, 'carrying every pasted image: ' + created.images.length)
 assert.ok(
   created.images.every((image) => typeof image.data === 'string' && image.data !== '' && typeof image.mediaType === 'string' && image.mediaType !== ''),

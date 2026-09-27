@@ -34,6 +34,11 @@
  *  29. the status line is hidden again (build marker and open count disappear)
  *  30. the mode hint is not rendered (the mode chip goes unexplained)
  *  31. the mode hint is reworded (the text drifts from what was asked for)
+ *  32. the current session is read from a store key that does not exist (both
+ *      scope tabs go empty while the row labels stay right)
+ *  33. any listed session counts as current (the retained flag is ignored)
+ *  34. the scope tabs stop narrowing by session
+ *  35. the scope tabs stop narrowing by directory
  *
  * Patterns are matched against a normalized (LF) copy because the working tree
  * is checked out with CRLF on Windows, then the replacement is mapped back onto
@@ -276,6 +281,42 @@ const mutants = [
     name: 'the mode hint is reworded (the text drifts from what was asked for)',
     from: "'你可以通过点击更改任务执行模式，但不建议任务开始执行后更改',",
     to: "'点模式标签可以改执行模式。',",
+  },
+  {
+    // v0.11.4. The scope tabs read the current session off `s.current`, a key the
+    // session-list store has never had, so `cwd` and `currentId` both collapsed to
+    // `''`/`undefined`: 「当前目录」 compared every row against `''` and 「当前会话」
+    // against `undefined`, listing nothing — while the row labels (host payload)
+    // stayed correct, which is what made it look like a filter bug rather than a
+    // dead read. This is the exact regression.
+    name: 'the current session comes from a store key that does not exist (scope tabs go empty)',
+    from:
+      '    const byId = s === undefined || s === null ? undefined : s.byId\n' +
+      '    if (byId === undefined || byId === null) return undefined\n' +
+      '    for (const row of Object.values(byId)) {\n' +
+      '      if (row !== null && typeof row === \'object\' && ((row.retainedBy ?? {}).mainView ?? 0) > 0) return row\n' +
+      '    }\n' +
+      '    return undefined',
+    to:
+      '    const byId = s === undefined || s === null ? undefined : s.byId\n' +
+      '    if (byId === undefined || byId === null) return undefined\n' +
+      '    return byId[s.current]',
+  },
+  {
+    name: 'any listed session counts as current (the retained flag is ignored)',
+    from:
+      "      if (row !== null && typeof row === 'object' && ((row.retainedBy ?? {}).mainView ?? 0) > 0) return row",
+    to: "      if (row !== null && typeof row === 'object') return row",
+  },
+  {
+    name: 'the scope tabs stop narrowing by session',
+    from: '  const bySession = todos.filter((t) => t.sourceSessionId === currentId)',
+    to: '  const bySession = todos.filter(() => true)',
+  },
+  {
+    name: 'the scope tabs stop narrowing by directory',
+    from: '  const byDir = todos.filter((t) => t.dir === cwdKey)',
+    to: '  const byDir = todos.filter(() => true)',
   },
 ]
 
