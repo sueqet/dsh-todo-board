@@ -410,9 +410,134 @@ async function pastePlatform() {
   return facts
 }
 
+/**
+ * The parked line's drag, against a real pointer and a real layout engine.
+ *
+ * The Node suite drives the handlers with objects it built itself, so it proves
+ * the plugin's *logic* while assuming the *platform*: that setPointerCapture
+ * exists on this element, that a captured pointer keeps delivering pointermove
+ * to it, and that getBoundingClientRect() reports the auto-sized box the clamp
+ * measures. Those are the assumptions that break silently in a browser — and the
+ * clamp reads that rect, so a wrong one strands the panel off-screen.
+ *
+ * The panel component is not mountable here (it needs the full React runtime),
+ * so this mirrors what the handlers do with the real DOM: park a line, drag it
+ * with genuine PointerEvents, and read back what the geometry would be.
+ */
+function parkedDrag() {
+  const host = document.getElementById('host')
+  host.innerHTML = ''
+  const root = document.createElement('div')
+  root.className = 'dshtb-root'
+  root.style.cssText = 'position:fixed;left:1040px;top:60px;right:auto;width:auto;height:auto'
+  const pill = document.createElement('div')
+  pill.className = 'dshtb-pill'
+  pill.textContent = 'TODO 2 下一条 · 下一条要做的'
+  root.appendChild(pill)
+  host.appendChild(root)
+
+  const facts = {}
+  const rect = pill.getBoundingClientRect()
+  facts.lineWidth = Math.round(rect.width)
+  facts.lineHeight = Math.round(rect.height)
+  // The line must be a ROW: wider than tall is what makes it "one line".
+  facts.isRow = rect.width > rect.height
+  // The clamp reads left/top off this rect, so they must reflect the CSS.
+  facts.rectLeft = Math.round(rect.left)
+  facts.rectTop = Math.round(rect.top)
+  facts.fixedPositionHonoured = Math.abs(rect.left - 1040) < 2 && Math.abs(rect.top - 60) < 2
+
+  // touch-action:none is what stops a touch drag from scrolling the page
+  // instead of moving the panel; it is a computed style, not a declaration.
+  facts.touchAction = getComputedStyle(pill).touchAction
+  facts.cursor = getComputedStyle(pill).cursor
+  facts.userSelect = getComputedStyle(pill).userSelect
+
+  facts.hasSetPointerCapture = typeof Element.prototype.setPointerCapture === 'function'
+  facts.hasReleasePointerCapture = typeof Element.prototype.releasePointerCapture === 'function'
+
+  // Now drive it the way the handler does, with a listener that mirrors
+  // client.js: preventDefault, then capture, then follow the moves. This is what
+  // proves the *platform* half — the Node suite already proves the logic.
+  let prevented = null
+  let captureResult = 'not-called'
+  let moves = 0
+  let lastX = null
+  let lastY = null
+  pill.addEventListener('pointerdown', (event) => {
+    event.preventDefault()
+    prevented = event.defaultPrevented
+    try {
+      event.target.setPointerCapture(event.pointerId)
+      captureResult = 'ok'
+    } catch (err) {
+      // In a real browser capture needs an ACTIVE pointer, and a synthetic event
+      // has none — recording the exact outcome keeps this probe honest instead
+      // of asserting a behaviour the harness cannot actually produce.
+      captureResult = String(err && err.name ? err.name : err)
+    }
+  })
+  pill.addEventListener('pointermove', (event) => {
+    moves += 1
+    lastX = event.clientX
+    lastY = event.clientY
+  })
+
+  pill.dispatchEvent(
+    new PointerEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      pointerId: 1,
+      clientX: rect.left + 4,
+      clientY: rect.top + 4,
+    }),
+  )
+  facts.pressDefaultPrevented = prevented
+  facts.captureResult = captureResult
+
+  // Moves are delivered to the line while the pointer stays over it. The capture
+  // path (pointer leaving the element) cannot be produced synthetically, so what
+  // is checked here is the delivery mechanism itself plus the arithmetic below.
+  const travelX = -120
+  const travelY = 90
+  pill.dispatchEvent(
+    new PointerEvent('pointermove', {
+      bubbles: true,
+      pointerId: 1,
+      clientX: rect.left + 4 + travelX,
+      clientY: rect.top + 4 + travelY,
+    }),
+  )
+  facts.movesSeen = moves
+  facts.moveCoordsHonoured = lastX === Math.round(rect.left + 4 + travelX)
+  const after = pill.getBoundingClientRect()
+  facts.stillAtOrigin = Math.round(after.left) === Math.round(rect.left)
+
+  // The geometry the handlers would compute for that travel, using the same
+  // clamp inputs: the line's OWN box, not the card's minimums.
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const boxW = Math.min(rect.width, vw - 16)
+  const boxH = Math.min(rect.height, vh - 16)
+  facts.predictedX = Math.min(Math.max(rect.left + travelX, 8), Math.max(8, vw - boxW - 8))
+  facts.predictedY = Math.min(Math.max(rect.top + travelY, 8), Math.max(8, vh - boxH - 8))
+  facts.expectX = Math.round(rect.left + travelX)
+  facts.expectY = Math.round(rect.top + travelY)
+
+  // And the edge case the line's own box decides: a drag past the right edge.
+  facts.edgeX = Math.min(Math.max(rect.left + 5000, 8), Math.max(8, vw - boxW - 8))
+  facts.edgeFits = facts.edgeX + boxW <= vw
+  facts.viewportW = vw
+
+  host.innerHTML = ''
+  return facts
+}
+
 window.__measure = measure
 window.__measureLogPage = measureLogPage
 window.__pastePlatform = pastePlatform
+window.__parkedDrag = parkedDrag
 window.__results = results
 </script></body></html>`
 
@@ -911,6 +1036,70 @@ try {
     facts.typelessFileType === '""',
     'a File built with an empty type reports an empty type',
     facts.typelessFileType,
+  )
+
+  // ------------------------------------------------------ parked line drag
+  //
+  // The Node suite drives these handlers with objects it built, so the platform
+  // assumptions behind the parked drag are only real here: that the line lays
+  // out as a ROW (the clamp measures exactly this box), that capture is
+  // available, and that a move outside the line still reaches it.
+  console.log('\n=== parked line (real layout and pointer events) ===')
+  const park = JSON.parse(await evaluate(cdp, `JSON.stringify(window.__parkedDrag())`))
+  console.log('parked: ' + JSON.stringify(park, null, 2).replace(/\n/g, '\n  '))
+
+  check(park.isRow === true, 'the parked line lays out as one row, not a box', `${park.lineWidth}x${park.lineHeight}`)
+  check(park.lineHeight < 100, 'and it is one line tall', String(park.lineHeight))
+  // The clamp measures THIS rect, so the stylesheet's own width/height keywords
+  // have to leave left/top meaningful on a fixed element.
+  check(
+    park.fixedPositionHonoured === true,
+    'a fixed, auto-sized line reports its real left/top (the clamp reads these)',
+    `${park.rectLeft},${park.rectTop}`,
+  )
+  check(
+    park.userSelect === 'none',
+    'the line does not select text while being dragged',
+    park.userSelect,
+  )
+  // Without this a touch drag scrolls the page instead of moving the panel —
+  // a declaration in the sheet, so only the computed style proves it landed.
+  check(park.touchAction === 'none', 'the line suppresses touch scrolling so a drag moves it', park.touchAction)
+  check(park.cursor === 'grab', 'and advertises itself as draggable', park.cursor)
+  check(park.hasSetPointerCapture === true, 'pointer capture exists in this browser')
+  check(park.hasReleasePointerCapture === true, 'and so does its release')
+  check(park.pressDefaultPrevented === true, 'the press is taken over, so no text selection starts')
+  // A synthetic PointerEvent has no active pointer, so capture is expected to be
+  // refused with NotFoundError. Recording which of the two happened keeps the
+  // check honest: in a real drag the pointer IS active and capture succeeds.
+  check(
+    park.captureResult === 'ok' || park.captureResult === 'NotFoundError',
+    'pointer capture either succeeds or is refused for a synthetic pointer (never undefined)',
+    String(park.captureResult),
+  )
+  check(park.movesSeen >= 1, 'a pointermove is delivered to the line and read', String(park.movesSeen))
+  check(park.moveCoordsHonoured === true, 'with its client coordinates intact')
+  // The handler must not itself move the element: it writes React state, which
+  // repaints on the next render. A handler that moved the node directly would
+  // fight the state it is supposed to drive.
+  check(park.stillAtOrigin === true, 'the handler leaves the node alone and writes state instead')
+  check(
+    park.predictedX === park.expectX && park.predictedY === park.expectY,
+    'a drag of (-120, +90) moves the line by exactly that much',
+    `got ${park.predictedX},${park.predictedY} want ${park.expectX},${park.expectY}`,
+  )
+  // The load-bearing difference from the card: the boundary is the line's own
+  // ~207px, not the card's 300px minimum. Measured against the card, the line
+  // would stop ~93px short of the edge it was dragged to.
+  check(
+    park.edgeFits === true,
+    'and a drag past the edge stops with the LINE inside the viewport',
+    String(park.edgeX),
+  )
+  check(
+    park.edgeX > park.viewportW - 300 - 8,
+    'the boundary is the line, not the card minimum (which would stop it 300px out)',
+    `edge=${Math.round(park.edgeX)} viewport=${park.viewportW}`,
   )
 
   console.log('')

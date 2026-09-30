@@ -101,7 +101,7 @@ const SKINS = [
  * host and browser halves of one release are one build. `client-smoke.mjs` pins
  * the two together, because a footer that lies is worse than no footer.
  */
-const BUILD = '0.11.4'
+const BUILD = '0.12.0'
 
 /**
  * Severity filters in the log view, most severe first.
@@ -354,8 +354,10 @@ button.dshtb-chip:hover{border-color:var(--tb-line2);color:var(--tb-ink)}
    align-self keeps it hugging its content instead of stretching to the card width. */
 .dshtb-pill{align-self:flex-start;display:flex;align-items:center;gap:8px;min-width:0;
   max-width:calc(100vw - 32px);padding:6px 10px;border-radius:10px;
-  background:var(--tb-bg);border:1px solid var(--tb-line);cursor:pointer;user-select:none;
+  background:var(--tb-bg);border:1px solid var(--tb-line);cursor:grab;user-select:none;
+  touch-action:none;
   box-shadow:0 10px 30px -12px rgba(0,0,0,.5);transition:border-color .14s}
+.dshtb-pill:active{cursor:grabbing}
 .dshtb-pill:hover{border-color:var(--tb-line2)}
 .dshtb-pill .lbl{font:600 10px/1 ${MONO};letter-spacing:.12em;text-transform:uppercase;color:var(--tb-ink)}
 .dshtb-pill .next{flex:1;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;
@@ -868,6 +870,29 @@ function copyText(text) {
 const LAYOUT_KEY = 'dsh.todoBoard.layout.v1'
 const MIN_W = 300
 const MIN_H = 260
+/** The shipped CSS width of the card, used as a fallback when bounding a position. */
+const DEFAULT_W = 380
+/** The parked line is one row of text; only its height fallback needs to know that. */
+const PILL_H = 40
+/** Pointer travel (in px) that turns a press on the parked line into a drag. */
+const PARK_SLOP = 3
+
+/**
+ * A stored size is either a usable number or "never chosen" (null).
+ *
+ * The difference matters now that the parked line is draggable. Moving the line
+ * is a position change and nothing else, so it must not launder the line's own
+ * auto-sized rect into the card's geometry — that would leave the panel 40px
+ * tall (or 300 wide, via MIN_W) the next time it unfolds.
+ */
+function dimension(value) {
+  // One expression, deliberately: `Number(null)` is 0 and `Number(undefined)` is
+  // NaN, so both fall out of the same test as a bad string would. An early
+  // `return null` for the two JSON cases would be dead weight the guard below
+  // could no longer reach — and an unreachable line is an untested one.
+  const size = Number(value)
+  return isFinite(size) && size > 0 ? size : null
+}
 
 function loadLayout() {
   try {
@@ -877,10 +902,8 @@ function loadLayout() {
     if (parsed === null || typeof parsed !== 'object') return null
     const x = Number(parsed.x)
     const y = Number(parsed.y)
-    const w = Number(parsed.w)
-    const h = Number(parsed.h)
-    if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h)) return null
-    return { x, y, w, h }
+    if (!isFinite(x) || !isFinite(y)) return null
+    return { x, y, w: dimension(parsed.w), h: dimension(parsed.h) }
   } catch (err) {
     return null
   }
@@ -951,20 +974,66 @@ function saveSkin(id) {
   }
 }
 
+/**
+ * Fit a card geometry inside the viewport.
+ *
+ * A `null` width or height means "the stylesheet decides", and stays null: only
+ * an actual resize of the card writes a size. The two fallbacks exist purely so
+ * that a position can still be bounded when no size is known yet — the card's
+ * shipped CSS width, and its CSS `max-height` cap.
+ */
 function clampLayout(layout) {
   const maxW = Math.max(MIN_W, window.innerWidth - 16)
   const maxH = Math.max(MIN_H, window.innerHeight - 16)
-  const w = Math.min(Math.max(layout.w, MIN_W), maxW)
-  const h = Math.min(Math.max(layout.h, MIN_H), maxH)
-  const x = Math.min(Math.max(layout.x, 8), Math.max(8, window.innerWidth - w - 8))
-  const y = Math.min(Math.max(layout.y, 8), Math.max(8, window.innerHeight - h - 8))
+  const w = layout.w === null ? null : Math.min(Math.max(layout.w, MIN_W), maxW)
+  const h = layout.h === null ? null : Math.min(Math.max(layout.h, MIN_H), maxH)
+  const boxW = w === null ? Math.min(DEFAULT_W, Math.max(0, window.innerWidth - 16)) : w
+  const boxH = h === null ? Math.min(680, Math.max(0, window.innerHeight * 0.8)) : h
+  const x = Math.min(Math.max(layout.x, 8), Math.max(8, window.innerWidth - boxW - 8))
+  const y = Math.min(Math.max(layout.y, 8), Math.max(8, window.innerHeight - boxH - 8))
   return { x, y, w, h }
+}
+
+/**
+ * Fit the parked line's position inside the viewport, from its measured size.
+ *
+ * Separate from {@link clampLayout} because the parked line is a different
+ * shape: it is one auto-sized row, so neither the card's minimums nor its
+ * default width apply. The rect is measured rather than assumed — the line's
+ * width follows the text of the next todo, up to a CSS cap.
+ *
+ * @param layout - Position to clamp; only x and y are read.
+ * @param rect - The parked line's live bounding box, in viewport coordinates.
+ * @returns The same geometry with x and y brought back inside the viewport.
+ */
+function clampParked(layout, rect) {
+  const boxW = Math.min(rect.width, Math.max(0, window.innerWidth - 16))
+  const boxH = Math.min(rect.height, Math.max(0, window.innerHeight - 16))
+  const x = Math.min(Math.max(layout.x, 8), Math.max(8, window.innerWidth - boxW - 8))
+  const y = Math.min(Math.max(layout.y, 8), Math.max(8, window.innerHeight - boxH - 8))
+  return { x, y, w: layout.w, h: layout.h }
 }
 
 function sameLayout(a, b) {
   if (a === b) return true
   if (a === null || b === null) return false
   return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+}
+
+/**
+ * The parked line's box, for clamping when no live element is available.
+ *
+ * A re-clamp can be asked to run before the line has been laid out (a resize
+ * event between mount and first paint, or the catch-up call the effect makes on
+ * install). Falling back to the row's own CSS height and the card's width keeps
+ * the position bounded in that window instead of clamping against nothing.
+ */
+function pillBox(element) {
+  if (element !== null && element !== undefined && typeof element.getBoundingClientRect === 'function') {
+    const rect = element.getBoundingClientRect()
+    if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
+  }
+  return { width: Math.min(DEFAULT_W, window.innerWidth - 16), height: PILL_H }
 }
 
 /**
@@ -1101,14 +1170,32 @@ function TodoBoard(props) {
   const preferredRef = React.useRef(initial.preferred)
   const layoutRef = React.useRef(null)
   const dragRef = React.useRef(null)
+  /** Live press on the parked line: its start point, its rect, and whether it dragged. */
+  const parkRef = React.useRef(null)
   const inputRef = React.useRef(null)
   const editRef = React.useRef(null)
+  /** The parked line's element, so a re-clamp can measure the box it must fit. */
+  const pillRef = React.useRef(null)
   /** id -> remindedAt already surfaced, so a reminder notifies exactly once. */
   const seenReminders = React.useRef({})
 
   function applyLayout(next) {
     const clamped = clampLayout(next)
     // A drag is an explicit choice, so record it as the preferred geometry too.
+    preferredRef.current = clamped
+    layoutRef.current = clamped
+    setLayout(clamped)
+  }
+
+  /**
+   * Move the parked line, keeping its size out of the deal.
+   *
+   * The line is one auto-sized row, so its position is clamped against its own
+   * measured box rather than the card's minimums — and the stored width/height
+   * are carried through untouched, because they belong to the unfolded card.
+   */
+  function applyParkedLayout(next, rect) {
+    const clamped = clampParked(next, rect)
     preferredRef.current = clamped
     layoutRef.current = clamped
     setLayout(clamped)
@@ -1157,6 +1244,70 @@ function TodoBoard(props) {
     }
   }
 
+  /**
+   * Press on the parked line: a candidate drag that is still a click.
+   *
+   * Nothing moves until the pointer has travelled past {@link PARK_SLOP}, so a
+   * press that never moves still reaches the click handler and unfolds the
+   * panel. The line has no controls inside it, so — unlike the title bar — the
+   * pointer can be captured here without stealing anyone else's click.
+   */
+  function beginParkDrag(event) {
+    if (event.button !== 0) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const current = layoutRef.current
+    const stored = preferredRef.current
+    parkRef.current = {
+      pointerId: event.pointerId,
+      active: true,
+      moved: false,
+      startX: event.clientX,
+      startY: event.clientY,
+      rect,
+      // The size belongs to the unfolded card; only x/y are ever rewritten here.
+      origin: {
+        x: rect.left,
+        y: rect.top,
+        w: current === null ? (stored === null ? null : stored.w) : current.w,
+        h: current === null ? (stored === null ? null : stored.h) : current.h,
+      },
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+
+  function moveParkDrag(event) {
+    const drag = parkRef.current
+    if (drag === null || drag.active !== true || drag.pointerId !== event.pointerId) return
+    const dx = event.clientX - drag.startX
+    const dy = event.clientY - drag.startY
+    // Under the slop this is still a click on the way to unfolding the panel.
+    if (drag.moved !== true) {
+      if (Math.abs(dx) < PARK_SLOP && Math.abs(dy) < PARK_SLOP) return
+      drag.moved = true
+    }
+    applyParkedLayout({ x: drag.origin.x + dx, y: drag.origin.y + dy, w: drag.origin.w, h: drag.origin.h }, drag.rect)
+  }
+
+  function endParkDrag() {
+    const drag = parkRef.current
+    if (drag === null || drag.active !== true) return
+    drag.active = false
+    // `moved` is deliberately left set: the click that follows this pointerup
+    // must not unfold a panel the user just dragged somewhere.
+    if (drag.moved === true) saveLayout(layoutRef.current)
+  }
+
+  /** Unfold the parked line — unless the press that ended here was a drag. */
+  function unparkOnClick() {
+    const drag = parkRef.current
+    if (drag !== null && drag.moved === true) {
+      drag.moved = false
+      return
+    }
+    setOpen(true)
+  }
+
   function endPointer() {
     if (dragRef.current === null) return
     dragRef.current = null
@@ -1192,7 +1343,10 @@ function TodoBoard(props) {
       setLayout((current) => {
         if (current === null) return current
         const preferred = preferredRef.current
-        const next = clampLayout(preferred === null ? current : preferred)
+        const source = preferred === null ? current : preferred
+        // The parked line is auto-sized, so it is bounded by its own measured
+        // box: the card's minimums describe a shape this state does not have.
+        const next = open ? clampLayout(source) : clampParked(source, pillBox(pillRef.current))
         // Returning the same object lets React bail out, so a resize that
         // changes nothing does not re-render the panel.
         return sameLayout(next, current) ? current : next
@@ -2173,6 +2327,8 @@ function TodoBoard(props) {
         className: 'dshtb-root',
         // The skin travels with the parked line too: it is the same panel.
         'data-dshtb-skin': skin,
+        // Always auto-sized: the line hugs its content, which is the point of
+        // this state — so the card's stored width and height stay out of it.
         style:
           layout === null
             ? {}
@@ -2192,11 +2348,18 @@ function TodoBoard(props) {
           className: 'dshtb-pill',
           role: 'button',
           tabIndex: 0,
+          ref: pillRef,
           title:
-            'TODO 板 · 点击展开' +
+            'TODO 板 · 点击展开 · 拖动移动' +
             (next === undefined ? '（没有未完成待办）' : '：' + next.title) +
             (data !== null && data !== undefined && data.storagePath ? '\n存储：' + data.storagePath : ''),
-          onClick: () => setOpen(true),
+          // A press that travels is a move; a press that does not is still the
+          // click that unfolds the panel (see `beginParkDrag`).
+          onPointerDown: beginParkDrag,
+          onPointerMove: moveParkDrag,
+          onPointerUp: endParkDrag,
+          onPointerCancel: endParkDrag,
+          onClick: unparkOnClick,
           onKeyDown: (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
@@ -2254,6 +2417,9 @@ function TodoBoard(props) {
   const skinHint = activeSkin.hint
   const skinGlyph = activeSkin.glyph
 
+  // A null width or height means "the stylesheet decides": that is the state
+  // after the line was dragged while parked, and it must survive unfolding so
+  // the card comes back at its own size rather than the line's.
   const rootStyle =
     layout === null
       ? {}
@@ -2261,10 +2427,8 @@ function TodoBoard(props) {
           left: layout.x + 'px',
           top: layout.y + 'px',
           right: 'auto',
-          width: layout.w + 'px',
-          height: layout.h + 'px',
-          maxWidth: 'none',
-          maxHeight: 'none',
+          ...(layout.w === null ? {} : { width: layout.w + 'px', maxWidth: 'none' }),
+          ...(layout.h === null ? {} : { height: layout.h + 'px', maxHeight: 'none' }),
         }
 
   /**

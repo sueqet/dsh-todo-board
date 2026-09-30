@@ -62,7 +62,15 @@ const React = {
       flat.push(value)
     }
     for (const child of children) push(child)
-    return { type, props: props === null || props === undefined ? {} : props, children: flat }
+    const node = { type, props: props === null || props === undefined ? {} : props, children: flat }
+    // A real renderer attaches `ref.current` to the DOM node; the panel reads the
+    // parked line's own box through it to bound that box against the viewport.
+    // Only the pill is stubbed — the other refs (the two growing textareas) need
+    // a `style` object, which is a different stub with a different job.
+    if (node.props.className === 'dshtb-pill' && node.props.ref !== undefined && node.props.ref !== null) {
+      node.props.ref.current = { getBoundingClientRect: () => pillRect }
+    }
+    return node
   },
   useState(initial) {
     const at = cursor
@@ -190,6 +198,16 @@ globalThis.document = {
 
 /** Downloads triggered through a stub `<a download>`, in order. */
 const downloads = []
+
+/**
+ * The parked line's box, as the browser would report it.
+ *
+ * The line is auto-sized: it is one row of text, so its width follows the next
+ * todo's title up to a CSS cap. A clamp that assumed the card's box instead
+ * would be measuring a shape this state does not have, which is exactly what the
+ * re-clamp test below pins down. Mutable so a test can state the size it means.
+ */
+let pillRect = { left: 1040, top: 60, width: 220, height: 40 }
 
 /** Every <style> apply() has installed, in order. */
 const headStyles = []
@@ -656,6 +674,186 @@ assert.ok(pillText.includes('下一条 · 下一条要做的'), 'the line shows 
 tree = click(pill)
 assert.equal(findByClass(tree, 'dshtb-card').length, 1, 'clicking the line unfolds the panel')
 console.log('park    OK')
+
+// -- the parked line is draggable -----------------------------------------
+//
+// Parking used to be a dead end for positioning: the drag handle lives in the
+// title bar, which the parked state does not render, so a panel that had been
+// folded away could only be moved by unfolding it first. The line now carries
+// its own drag — but it is also still the click that unfolds the panel, and
+// those two jobs share one gesture, so both halves are pinned here.
+
+/** The panel's painted position, whether or not a size was chosen. */
+function positionOf(tree) {
+  const root = findByClass(tree, 'dshtb-root')[0]
+  const style = root.props.style
+  if (style === undefined || style.left === undefined) return null
+  return { x: parseFloat(style.left), y: parseFloat(style.top) }
+}
+
+/** The size the panel would paint, or null where nothing has been chosen. */
+function sizeOf(tree) {
+  const root = findByClass(tree, 'dshtb-root')[0]
+  const style = root.props.style
+  if (style === undefined) return null
+  return {
+    w: style.width === undefined ? null : parseFloat(style.width),
+    h: style.height === undefined ? null : parseFloat(style.height),
+  }
+}
+
+/**
+ * Drive one press-move-release on the parked line, the way a pointer would.
+ *
+ * @param pill - The parked line node from the current render.
+ * @param dx - Horizontal travel.
+ * @param dy - Vertical travel.
+ * @param box - The rect the line reports for itself.
+ * @returns The tree after the gesture.
+ */
+function dragParked(pill, dx, dy, box) {
+  const rect = box === undefined ? { left: 1040, top: 60, width: 220, height: 40 } : box
+  let captured = 0
+  const currentTarget = {
+    getBoundingClientRect: () => rect,
+    setPointerCapture: () => {
+      captured += 1
+    },
+  }
+  const at = (x, y) => ({
+    button: 0,
+    pointerId: 7,
+    clientX: x,
+    clientY: y,
+    currentTarget,
+    preventDefault() {},
+    stopPropagation() {},
+  })
+  pill.props.onPointerDown(at(rect.left, rect.top))
+  assert.equal(captured, 1, 'the press captures the pointer so the drag survives leaving the line')
+  let next = render()
+  // One move past the slop, then one to the final offset: a single jump would
+  // not prove the slop is measured rather than assumed.
+  findByClass(next, 'dshtb-pill')[0].props.onPointerMove(at(rect.left + dx, rect.top + dy))
+  next = render()
+  findByClass(next, 'dshtb-pill')[0].props.onPointerMove(at(rect.left + dx, rect.top + dy))
+  next = render()
+  findByClass(next, 'dshtb-pill')[0].props.onPointerUp(at(rect.left + dx, rect.top + dy))
+  return render()
+}
+
+// Start from a clean slate so the drag is the only thing that writes geometry.
+storage.delete('dsh.todoBoard.layout.v1')
+tree = remount()
+tree = click(findByClass(tree, 'dshtb-fold')[0])
+assert.equal(findByClass(tree, 'dshtb-pill').length, 1, 'the panel is parked for the drag tests')
+
+const dragged = dragParked(findByClass(tree, 'dshtb-pill')[0], -120, 90)
+assert.deepEqual(
+  positionOf(dragged),
+  { x: 920, y: 150 },
+  'dragging the line moves it by exactly the pointer travel',
+)
+const storedAfterDrag = JSON.parse(storage.get('dsh.todoBoard.layout.v1'))
+assert.equal(storedAfterDrag.x, 920, 'the dragged position is persisted')
+assert.equal(storedAfterDrag.y, 150, 'on both axes')
+
+// The critical one: the line is 40px tall and auto-wide, and neither number may
+// become the card's geometry. A parked drag moves the panel; it does not resize it.
+assert.equal(
+  storedAfterDrag.w,
+  null,
+  'moving the line never promotes the line width into the card width',
+)
+assert.equal(
+  storedAfterDrag.h,
+  null,
+  'nor the line height into the card height',
+)
+
+// A press that drags must not also read as the click that unfolds the panel:
+// the browser fires both, and unfolding after a move is the bug this prevents.
+tree = click(findByClass(tree, 'dshtb-pill')[0])
+assert.equal(
+  findByClass(tree, 'dshtb-card').length,
+  0,
+  'the click that ends a drag does not unfold the panel',
+)
+
+// ...while a press that stays put is still a click.
+const stillPress = findByClass(tree, 'dshtb-pill')[0]
+stillPress.props.onPointerDown({
+  button: 0,
+  pointerId: 8,
+  clientX: 920,
+  clientY: 150,
+  currentTarget: {
+    getBoundingClientRect: () => ({ left: 920, top: 150, width: 220, height: 40 }),
+    setPointerCapture: () => {},
+  },
+  preventDefault() {},
+  stopPropagation() {},
+})
+stillPress.props.onPointerMove({ pointerId: 8, clientX: 921, clientY: 150 })
+stillPress.props.onPointerUp({ pointerId: 8 })
+tree = click(findByClass(tree, 'dshtb-pill')[0])
+assert.equal(
+  findByClass(tree, 'dshtb-card').length,
+  1,
+  'a press under the slop still unfolds the panel — the line stays clickable',
+)
+
+// The unfolded card must come back at its own size, not the line's: a width of
+// 220 (or a height of 40) here would mean the parked drag resized the panel.
+const afterUnfold = sizeOf(tree)
+assert.equal(afterUnfold.w, null, 'unfolding uses the stylesheet width, not the line width')
+assert.equal(afterUnfold.h, null, 'and the stylesheet height, not the line height')
+console.log('parkdrag OK')
+
+// A re-clamp while parked must bound the line by the LINE's box. Using the
+// card's minimums here would fling a short line 300px away from its edge.
+resizeTo(1440, 900)
+tree = remount()
+tree = click(findByClass(tree, 'dshtb-fold')[0])
+const parkedNearEdge = dragParked(findByClass(tree, 'dshtb-pill')[0], 500, 0)
+const parkedX = positionOf(parkedNearEdge).x
+const lineW = 220
+assert.ok(
+  parkedX + lineW <= 1440 - 8,
+  'a parked drag stops at the viewport edge measured from the line itself',
+)
+assert.ok(parkedX > 1440 - 300 - 8, 'and is not clamped back by the card minimum width')
+
+// A viewport change while parked takes the SAME branch. The line sits at the
+// right edge of a wide window; narrowing must pull it back in by the line's own
+// width. Measuring against the card's 300px minimum would leave it 80px too far
+// left — on screen, but no longer where the edge it was dragged to actually is.
+assert.equal(positionOf(parkedNearEdge).x, 1212, 'the line parks at the right edge of 1440')
+resizeTo(900, 700)
+tree = render()
+const afterNarrow = positionOf(tree)
+assert.ok(afterNarrow.x + lineW <= 900 - 8, 'narrowing pulls the parked line back inside the viewport')
+assert.equal(
+  afterNarrow.x,
+  900 - lineW - 8,
+  'and stops it exactly at the edge measured from the line, not from the card minimum',
+)
+console.log('parkclamp OK')
+
+// -- a size-less layout survives a reload as a size-less layout ------------
+//
+// A parked drag stores a position with no size on purpose. Reloading that must
+// give the panel back its own geometry — the moment a null size is "helpfully"
+// rounded up (to MIN_W, say), a line-only move has silently resized the card and
+// the panel comes back as a 300px box the user never asked for.
+storage.set('dsh.todoBoard.layout.v1', JSON.stringify({ x: 420, y: 80, w: null, h: null }))
+resizeTo(1440, 900)
+tree = remount()
+const sizeLess = sizeOf(tree)
+assert.deepEqual(positionOf(tree), { x: 420, y: 80 }, 'a size-less stored position is honoured')
+assert.equal(sizeLess.w, null, 'and stays size-less, so the stylesheet still decides the width')
+assert.equal(sizeLess.h, null, 'on both axes')
+console.log('sizeless OK')
 
 // -- the panel stays inside the viewport as the window changes -------------
 //

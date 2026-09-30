@@ -64,6 +64,11 @@ const mutants = [
     from: 'return { preferred: stored, clamped: stored === null ? null : clampLayout(stored) }',
     to: 'return { preferred: stored, clamped: stored }',
   },
+  {
+    name: 'a parked re-clamp uses the card box (the line is bounded by the wrong shape)',
+    from: '        const next = open ? clampLayout(source) : clampParked(source, pillBox(pillRef.current))',
+    to: '        const next = clampLayout(source)',
+  },
 ]
 
 /** `true` when the suite passes. Output is discarded on purpose (see above). */
@@ -110,4 +115,4 @@ if (!suitePasses()) {
 }
 
 if (!allCaught) process.exit(1)
-console.log('\nboth mutations caught; original restored and passing')
+console.log('\nevery mutation caught; original restored and passing')

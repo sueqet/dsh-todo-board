@@ -318,6 +318,31 @@ const mutants = [
     from: '  const byDir = todos.filter((t) => t.dir === cwdKey)',
     to: '  const byDir = todos.filter(() => true)',
   },
+  {
+    name: 'the parked line loses its drag (folding away strands the panel)',
+    from: '          onPointerDown: beginParkDrag,',
+    to: '          onPointerDown: () => {},',
+  },
+  {
+    name: 'the parked drag never passes the click slop (a press no longer unfolds)',
+    from: '      if (Math.abs(dx) < PARK_SLOP && Math.abs(dy) < PARK_SLOP) return',
+    to: '      if (false) return',
+  },
+  {
+    name: 'the parked drag resizes the card (the line keeps its own size)',
+    from: '    applyParkedLayout({ x: drag.origin.x + dx, y: drag.origin.y + dy, w: drag.origin.w, h: drag.origin.h }, drag.rect)',
+    to: '    applyLayout({ x: drag.origin.x + dx, y: drag.origin.y + dy, w: drag.rect.width, h: drag.rect.height })',
+  },
+  {
+    name: 'the click after a parked drag unfolds anyway (the move is undone)',
+    from: '    if (drag !== null && drag.moved === true) {',
+    to: '    if (false) {',
+  },
+  {
+    name: 'a stored size is rounded up out of nothing (the line sizes the card)',
+    from: "  return isFinite(size) && size > 0 ? size : null",
+    to: '  return isFinite(size) && size > 0 ? size : MIN_W',
+  },
 ]
 
 /** Apply one mutant to CRLF text by matching and replacing on the LF form. */
