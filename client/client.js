@@ -109,7 +109,20 @@ const SKINS = [
  * host and browser halves of one release are one build. `client-smoke.mjs` pins
  * the two together, because a footer that lies is worse than no footer.
  */
-const BUILD = '0.13.1'
+const BUILD = '0.13.4'
+
+/**
+ * How often a VISIBLE panel re-reads the board.
+ *
+ * Named rather than inlined because two places now depend on it (the interval
+ * and the tests), and because the number is a judgement call worth seeing in
+ * one place: fast enough that a row the AI just ticked feels immediate, slow
+ * enough that the host is not answering 400 requests a minute.
+ *
+ * While the page is hidden the interval is suspended outright — see the poll
+ * effect.
+ */
+const POLL_MS = 2500
 
 /**
  * Severity filters in the log view, most severe first.
@@ -184,11 +197,11 @@ const CSS = `
    controls — the fold parks the panel, the skin changes how it looks, the log
    swaps the page — and nothing should be able to find one while looking for
    another. Only the shared geometry lives in this rule. */
-.dshtb-fold,.dshtb-skin,.dshtb-log{width:26px;height:26px;border:1px solid transparent;border-radius:8px;
+.dshtb-fold,.dshtb-skin,.dshtb-log,.dshtb-settings{width:26px;height:26px;border:1px solid transparent;border-radius:8px;
   background:transparent;color:var(--tb-faint);cursor:pointer;font:600 14px/1 ${MONO};padding:0;
   display:grid;place-items:center;transition:background .12s,color .12s}
-.dshtb-fold:hover,.dshtb-skin:hover,.dshtb-log:hover{background:var(--tb-haze);color:var(--tb-blue-deep)}
-.dshtb-fold:focus-visible,.dshtb-skin:focus-visible,.dshtb-log:focus-visible{outline:2px solid var(--tb-blue);outline-offset:1px}
+.dshtb-fold:hover,.dshtb-skin:hover,.dshtb-log:hover,.dshtb-settings:hover{background:var(--tb-haze);color:var(--tb-blue-deep)}
+.dshtb-fold:focus-visible,.dshtb-skin:focus-visible,.dshtb-log:focus-visible,.dshtb-settings:focus-visible{outline:2px solid var(--tb-blue);outline-offset:1px}
 /* Section label doubling as the fold/unfold control for what follows it. */
 .dshtb-sect{display:flex;align-items:center;gap:6px;width:100%;padding:11px 14px 6px;
   border:0;background:transparent;cursor:pointer;user-select:none;text-align:left;
@@ -434,6 +447,27 @@ button.dshtb-chip:hover{background:var(--tb-haze);color:var(--tb-ink)}
    title bar. */
 .dshtb-log{position:relative}
 .dshtb-log.on{background:var(--tb-blue-wash);color:var(--tb-blue-deep)}
+/* Settings view. Same page-swap shape as the log view, but it is a FORM: the
+   only surface here a user types into besides the composer. */
+.dshtb-settings.on{background:var(--tb-blue-wash);color:var(--tb-blue-deep)}
+.dshtb-settingsview{display:flex;flex-direction:column;min-height:0;flex:1;padding:4px 14px 12px;gap:11px;
+  overflow-y:auto}
+.dshtb-settingsview .dshtb-setrow{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--tb-ink)}
+.dshtb-settingsview label.dshtb-setrow{cursor:pointer}
+.dshtb-settingsview input[type=checkbox]{width:15px;height:15px;accent-color:var(--tb-blue);cursor:pointer}
+.dshtb-setnum{width:84px;padding:5px 8px;border-radius:7px;border:1px solid var(--tb-line);
+  background:var(--tb-paper);color:var(--tb-ink);font:inherit;font-size:12.5px}
+.dshtb-setnum:focus{outline:none;border-color:var(--tb-blue);box-shadow:0 0 0 3px var(--tb-ring)}
+.dshtb-setnum:disabled{opacity:.45;cursor:not-allowed}
+.dshtb-sethint{font-size:11.5px;color:var(--tb-faint);line-height:1.5}
+.dshtb-setactions{display:flex;align-items:center;gap:8px;padding-top:2px}
+.dshtb-setbtn{padding:6px 13px;border-radius:8px;border:1px solid var(--tb-line);background:var(--tb-paper);
+  color:var(--tb-ink);font:inherit;font-size:12.5px;cursor:pointer}
+.dshtb-setbtn:hover{background:var(--tb-haze);border-color:var(--tb-blue)}
+.dshtb-setbtn.primary{background:var(--tb-blue);border-color:var(--tb-blue);color:#fff}
+.dshtb-setbtn.primary:hover{background:var(--tb-blue-deep);border-color:var(--tb-blue-deep)}
+.dshtb-setbtn:disabled{opacity:.5;cursor:not-allowed}
+.dshtb-seterr{font-size:12px;color:var(--tb-red);line-height:1.5}
 .dshtb-dot{position:absolute;top:2px;right:2px;width:6px;height:6px;border-radius:50%;
   background:var(--tb-red);box-shadow:0 0 0 1.5px var(--tb-paper)}
 /* Developer view: monospace, dense, unabashedly plain. This is not a surface to
@@ -1016,12 +1050,58 @@ function loadLayout() {
   }
 }
 
+/**
+ * Coerce a layout that came from the HOST (board.json) into the same shape
+ * `loadLayout` produces, or `null` when it is not usable.
+ *
+ * The host is the source of truth now: localStorage is keyed by origin, so a
+ * restart on a different port read as "first run" and the panel jumped back to
+ * its default spot. Keeping the reading logic here (rather than trusting the
+ * payload) means a hand-edited board cannot hand the panel a NaN.
+ */
+function layoutFromHost(value) {
+  if (value === null || value === undefined || typeof value !== 'object') return null
+  const x = Number(value.x)
+  const y = Number(value.y)
+  if (!isFinite(x) || !isFinite(y)) return null
+  return { x, y, w: dimension(value.w), h: dimension(value.h) }
+}
+
+/**
+ * How the module-level layout helpers reach the component's transport.
+ *
+ * `saveLayout` lives at module scope (it predates the panel and the tests drive
+ * it directly), while the HTTP call lives inside the component. A single
+ * module-level slot is the least machinery that connects them without turning
+ * every geometry write into a prop drilled through the render tree.
+ */
+let hostSaveLayout = null
+
+/**
+ * Write the geometry to BOTH places, on purpose.
+ *
+ * The host copy is the one that survives a port change, so it is the source of
+ * truth on load. The localStorage copy is a local fast path that survives the
+ * branch where the host route is unreachable (older host, or a session without
+ * the credentials the route requires): the panel should still remember where
+ * you put it within this browser even then. Writing both is cheap — a drag ends
+ * with one of each.
+ */
 function saveLayout(layout) {
+  // Local copy first and unconditionally: it is what the NEXT render in this
+  // browser reads, and it must be correct even if the host write fails.
   try {
     if (layout === null) window.localStorage.removeItem(LAYOUT_KEY)
     else window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout))
   } catch (err) {
     /* storage unavailable */
+  }
+  // Then the durable copy. Fire-and-forget: a geometry write must never make
+  // the panel feel laggy, and a failure here is recoverable from the local one.
+  try {
+    if (typeof hostSaveLayout === 'function') hostSaveLayout(layout)
+  } catch (err) {
+    /* the host channel is not wired yet; the local copy is enough */
   }
 }
 
@@ -1262,6 +1342,21 @@ function TodoBoard(props) {
    * cost is that a reload closes it, which for a debugging trip is fine.
    */
   const [logOpen, setLogOpen] = React.useState(false)
+  /**
+   * Whether the panel is showing the settings page.
+   *
+   * Sits beside `logOpen` rather than replacing it with a single "page" state:
+   * the two are independent toggles the user reaches for directly (the log
+   * button, the settings button), and collapsing them into one enum would mean
+   * inventing a rule for "settings while the log is open".
+   *
+   * Not persisted, same reasoning as the log view: reopening the GUI into a
+   * settings form is a worse default than reopening onto the board.
+   */
+  const [settingsOpen, setSettingsOpen] = React.useState(false)
+  /** The form's working copy; `null` until the first sync from the payload. */
+  const [settingsDraft, setSettingsDraft] = React.useState(null)
+  const [settingsErr, setSettingsErr] = React.useState('')
   const [logLevels, setLogLevels] = React.useState({ error: true, warn: true, info: false, debug: false })
   const [logSource, setLogSource] = React.useState(loadLogSource)
   const [logQuery, setLogQuery] = React.useState('')
@@ -1293,6 +1388,20 @@ function TodoBoard(props) {
   const pillRef = React.useRef(null)
   /** id -> remindedAt already surfaced, so a reminder notifies exactly once. */
   const seenReminders = React.useRef({})
+
+  /**
+   * Whether the host's saved geometry has been adopted yet.
+   *
+   * `initialGeometry()` runs during the first render, before any HTTP response
+   * exists, so the panel necessarily starts from its localStorage copy (or the
+   * CSS default). The host copy is the durable one — it survives a port change,
+   * which localStorage cannot — so the first snapshot that carries it wins.
+   *
+   * ONCE, deliberately: the poll re-delivers the same geometry every 2.5s, and
+   * re-applying it would fight the user's next drag for a couple of seconds
+   * every time they move the panel.
+   */
+  const adoptedHostLayout = React.useRef(false)
 
   function applyLayout(next) {
     const clamped = clampLayout(next)
@@ -1611,10 +1720,61 @@ function TodoBoard(props) {
     setCordisFound(cordisBadge() !== null)
   }
 
+  /**
+   * Poll the board, but only as often as you can actually see it.
+   *
+   * 2.5s is the right cadence for a panel someone is looking at — it is what
+   * makes a row the AI just ticked feel immediate. It is the wrong cadence for
+   * a panel that is minimised, in a background tab, or on a locked screen:
+   * nobody reads those pixels, yet the request keeps firing, and a day of that
+   * is tens of thousands of fetches that all resolve into nothing.
+   *
+   * So the interval is *suspended* while the page is hidden and re-armed (with
+   * an immediate refresh) the moment it is visible again. Suspending rather
+   * than slowing down is deliberate: a hidden panel has nothing to keep warm,
+   * and the returning `visibilitychange` gives us a precise "now is when the
+   * user is looking" signal that a slower timer would not.
+   *
+   * `refreshRef` holds the latest closure so the interval handler never
+   * captures a stale `refresh` — the effect below runs once, on mount.
+   */
+  const refreshRef = React.useRef(refresh)
   React.useEffect(() => {
-    refresh()
-    const id = window.setInterval(refresh, 2500)
-    return () => window.clearInterval(id)
+    refreshRef.current = refresh
+  })
+
+  React.useEffect(() => {
+    const visible = () => document.visibilityState !== 'hidden'
+    let timer = null
+
+    const start = () => {
+      if (timer !== null) return
+      timer = window.setInterval(() => refreshRef.current(), POLL_MS)
+    }
+    const stop = () => {
+      if (timer === null) return
+      window.clearInterval(timer)
+      timer = null
+    }
+
+    const onVisibility = () => {
+      if (visible()) {
+        // Catch up FIRST, then resume the cadence: coming back to a panel that
+        // shows a 40-minute-old board for the next tick reads as broken.
+        refreshRef.current()
+        start()
+      } else {
+        stop()
+      }
+    }
+
+    refreshRef.current()
+    if (visible()) start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      stop()
+    }
   }, [])
 
   /**
@@ -1642,6 +1802,60 @@ function TodoBoard(props) {
   }, [])
 
   const todos = data !== null && data !== undefined && Array.isArray(data.todos) ? data.todos : []
+
+  // Adopt the host's geometry the first time a snapshot carries one. See
+  // `adoptedHostLayout` for why this happens once rather than on every poll.
+  React.useEffect(() => {
+    if (adoptedHostLayout.current) return
+    if (data === null || data === undefined) return
+    const fromHost = layoutFromHost(data.layout)
+    if (fromHost === null) return
+    adoptedHostLayout.current = true
+    applyLayout(fromHost)
+    // `applyLayout` is stable in behaviour (it writes refs and one state set).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
+
+  // Hand the module-level `saveLayout` a way to reach the transport. Cleared on
+  // unmount so a stale closure cannot outlive the component.
+  React.useEffect(() => {
+    hostSaveLayout = (geometry) => {
+      call('layout', { layout: geometry })
+    }
+    return () => {
+      hostSaveLayout = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+
+  /**
+   * The saved settings, as the host last reported them. Every poll refreshes
+   * this, so a board edited by a script or another browser converges instead of
+   * showing a stale form forever.
+   */
+  const savedSettings =
+    data !== null && data !== undefined && data.settings !== null && typeof data.settings === 'object'
+      ? data.settings
+      : { nudge: true, minChars: 200, minEntries: 2, maxTurnSessions: 10 }
+
+  // The draft is a WORKING COPY, seeded when the page OPENS and then owned by
+  // the form: the 2.5s poll must never overwrite what the user is halfway
+  // through typing. Seeding on the open transition (rather than on every
+  // `savedSettings` change) is exactly what keeps 「恢复默认」 honest too — it
+  // edits the draft and does not touch the saved value.
+  React.useEffect(() => {
+    if (!settingsOpen) return
+    setSettingsDraft({
+      nudge: savedSettings.nudge !== false,
+      minChars: String(savedSettings.minChars),
+      minEntries: String(savedSettings.minEntries),
+      maxTurnSessions: String(savedSettings.maxTurnSessions),
+    })
+    setSettingsErr('')
+    // Keyed on the OPEN transition only; see the comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen])
   const cwdKey = cwd === '' ? '' : cwd.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
 
   const byDir = todos.filter((t) => t.dir === cwdKey)
@@ -1847,6 +2061,65 @@ function TodoBoard(props) {
 
   function toggleLog() {
     setLogOpen((current) => !current)
+  }
+
+  // Opening one page closes the other: they are both replacements for the board
+  // body, and showing two at once is a state the layout has no answer for.
+  function toggleSettings() {
+    setSettingsOpen((current) => {
+      if (!current) setLogOpen(false)
+      return !current
+    })
+  }
+
+  /** Parse one numeric field, or `undefined` when it is not a whole number. */
+  function draftNumber(value) {
+    const text = String(value === undefined || value === null ? '' : value).trim()
+    if (!/^\d+$/.test(text)) return undefined
+    const parsed = Number(text)
+    return Number.isSafeInteger(parsed) ? parsed : undefined
+  }
+
+  /**
+   * Write the draft. The host validates too (and wins): this only catches the
+   * obvious cases early enough to keep an invalid number from ever being sent.
+   */
+  function saveSettingsDraft() {
+    if (settingsDraft === null) return
+    const minChars = draftNumber(settingsDraft.minChars)
+    const minEntries = draftNumber(settingsDraft.minEntries)
+    const maxTurnSessions = draftNumber(settingsDraft.maxTurnSessions)
+    if (minChars === undefined) {
+      setSettingsErr('字数必须是整数')
+      return
+    }
+    if (minEntries === undefined) {
+      setSettingsErr('条目数必须是整数')
+      return
+    }
+    if (maxTurnSessions === undefined) {
+      setSettingsErr('单次回合最多新开会话必须是整数')
+      return
+    }
+    setSettingsErr('')
+    call('settings', {
+      settings: {
+        nudge: settingsDraft.nudge === true,
+        minChars,
+        minEntries,
+        maxTurnSessions,
+      },
+    })
+  }
+
+  function resetSettingsDraft() {
+    setSettingsDraft({
+      nudge: true,
+      minChars: '200',
+      minEntries: '2',
+      maxTurnSessions: '10',
+    })
+    setSettingsErr('')
   }
 
   function toggleLogLevel(level) {
@@ -2771,6 +3044,120 @@ function TodoBoard(props) {
    * plain: it is a developer surface, so it uses monospace, wraps long text and
    * spends no effort on decoration.
    */
+  /**
+   * The settings page: the planning-nudge knobs.
+   *
+   * A form, not a list — the only interactive surface here besides the
+   * composer, so it uses real inputs and a real submit button. The numbers are
+   * kept as STRINGS in the draft: `''` is a state a number cannot represent,
+   * and treating it as `0` would silently save a threshold nobody can reach.
+   */
+  const setNum = (field) => (e) => {
+    const value = e !== undefined && e.target !== undefined ? e.target.value : ''
+    setSettingsDraft((current) => (current === null ? current : { ...current, [field]: value }))
+  }
+  const settingsView = h(
+    'div',
+    { className: 'dshtb-settingsview' },
+    h(
+      'label',
+      { className: 'dshtb-setrow' },
+      h('input', {
+        type: 'checkbox',
+        checked: settingsDraft === null ? true : settingsDraft.nudge === true,
+        onChange: (e) =>
+          setSettingsDraft((current) =>
+            current === null ? current : { ...current, nudge: e.target.checked === true },
+          ),
+        'aria-label': '长任务主动提醒我拆分',
+      }),
+      '长任务主动提醒我拆分',
+    ),
+    h(
+      'div',
+      { className: 'dshtb-setrow' },
+      h('span', null, '字数 ≥'),
+      h('input', {
+        className: 'dshtb-setnum',
+        type: 'number',
+        min: 10,
+        max: 10000,
+        step: 1,
+        value: settingsDraft === null ? '' : settingsDraft.minChars,
+        disabled: settingsDraft !== null && settingsDraft.nudge !== true,
+        onChange: setNum('minChars'),
+        'aria-label': '字数下限',
+      }),
+    ),
+    h(
+      'div',
+      { className: 'dshtb-setrow' },
+      h('span', null, '条目数 ≥'),
+      h('input', {
+        className: 'dshtb-setnum',
+        type: 'number',
+        min: 1,
+        max: 100,
+        step: 1,
+        value: settingsDraft === null ? '' : settingsDraft.minEntries,
+        disabled: settingsDraft !== null && settingsDraft.nudge !== true,
+        onChange: setNum('minEntries'),
+        'aria-label': '条目数下限',
+      }),
+    ),
+    h(
+      'div',
+      { className: 'dshtb-setrow' },
+      h('span', null, '单次回合最多新开会话'),
+      h('input', {
+        className: 'dshtb-setnum',
+        type: 'number',
+        min: 1,
+        max: 50,
+        step: 1,
+        value: settingsDraft === null ? '' : settingsDraft.maxTurnSessions,
+        onChange: setNum('maxTurnSessions'),
+        'aria-label': '单次回合最多新开会话数',
+      }),
+    ),
+    h(
+      'div',
+      { className: 'dshtb-sethint' },
+      '「单次回合最多新开会话」：一次回合结束时，最多能为你开出多少个「自动新开会话」的待办。' +
+        '到上限后剩下的留到下一次回合，不会丢。计划超过这个数（比如拆了 20 步全是新会话）就想调大。' +
+        '默认 10，范围 1–50。',
+    ),
+    h(
+      'div',
+      { className: 'dshtb-sethint' },
+      '一条消息至少要有这么多字、且出现这么多次编号/列表/「第一步」之类的阶段标记，才会被认为「这事不止一步」。' +
+        '关掉开关就完全不提醒。每个会话最多提醒一次。',
+    ),
+    settingsErr === '' ? null : h('div', { className: 'dshtb-seterr' }, settingsErr),
+    h(
+      'div',
+      { className: 'dshtb-setactions' },
+      h(
+        'button',
+        {
+          className: 'dshtb-setbtn primary',
+          onClick: saveSettingsDraft,
+          disabled: settingsDraft === null || busy,
+        },
+        '保存',
+      ),
+      h(
+        'button',
+        {
+          className: 'dshtb-setbtn',
+          onClick: resetSettingsDraft,
+          disabled: settingsDraft === null,
+        },
+        '恢复默认',
+      ),
+    ),
+  )
+
   const logView = h(
     'div',
     { className: 'dshtb-logview' },
@@ -2925,6 +3312,19 @@ function TodoBoard(props) {
         h(
           'button',
           {
+            className: 'dshtb-settings' + (settingsOpen ? ' on' : ''),
+            title: settingsOpen
+              ? '回到待办面板'
+              : '设置\n长任务规划提醒：开关、字数与条目数阈值。',
+            'aria-label': settingsOpen ? '回到待办面板' : '打开设置',
+            'aria-pressed': settingsOpen ? 'true' : 'false',
+            onClick: toggleSettings,
+          },
+          settingsOpen ? '\u2190' : '\u2692',
+        ),
+        h(
+          'button',
+          {
             className: 'dshtb-fold',
             title: '收起为一行（只留计数与下一条待办）',
             'aria-label': '收起为一行',
@@ -2934,12 +3334,13 @@ function TodoBoard(props) {
         ),
       ),
       logOpen ? logView : null,
-      logOpen ? null : h('div', { className: 'dshtb-seg' }, segments),
+      settingsOpen ? settingsView : null,
+      logOpen || settingsOpen ? null : h('div', { className: 'dshtb-seg' }, segments),
       // `foldable` returns an ARRAY of [header, body], so it is always spread
       // rather than passed as one child. Nesting the array as a child works in
       // React but hides the subtree from anything that walks `children`
       // directly, which is what the browser-half suite does.
-      ...(logOpen
+      ...(logOpen || settingsOpen
         ? []
         : foldable({
             id: 'compose',
@@ -3059,7 +3460,7 @@ function TodoBoard(props) {
               ),
             ),
           })),
-      ...(logOpen
+      ...(logOpen || settingsOpen
         ? []
         : foldable({
             id: 'list',
@@ -3103,7 +3504,7 @@ function TodoBoard(props) {
       // a separate section rather than a filter on the list: ticking the round box
       // has to LOOK like the row left the queue, and a filter would silently keep
       // finished rows one click away from the work you are doing.
-      ...(logOpen
+      ...(logOpen || settingsOpen
         ? []
         : foldable({
             id: 'done',
@@ -3141,7 +3542,7 @@ function TodoBoard(props) {
       // by omission. So it has no header, no fold, and no stored state; the
       // `.dshtb-sp` keeps the two facts on the left and the two functional
       // entries (empty the 已完成 list, open the Cordis panel) on the right.
-      logOpen
+      logOpen || settingsOpen
         ? null
         : h(
             'div',

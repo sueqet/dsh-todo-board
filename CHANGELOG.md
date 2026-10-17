@@ -1,5 +1,100 @@
 # Changelog
 
+## 0.13.4
+
+**三处过度约束松绑，外加一个「计划 20 步、却只派 10 步」的不一致。**
+
+- **轮询不再在后台上空转。** 面板原来无条件每 2.5s 拉一次板子，包括窗口最小化、标签页切走、屏幕锁上的时候——那些像素没人看，请求照发，一天下来是几万次落到空处的 fetch。现在页面隐藏时**暂停** interval，`visibilitychange` 回到前台时**先立即刷新一次再恢复**（先刷新是有意的：回到一个显示着 40 分钟前数据的面板，比慢一个 tick 更像坏了）。
+  - 暂停而不是降频：隐藏的面板没有东西需要保温，而回到前台那一刻本身就是「用户现在在看」的精确信号，降频得不到它。
+  - `POLL_MS` 提成具名常量，两个地方（interval 与测试）都指向它。
+- **`note` 不再要求审批。** 判断标准和当初放行 `done` 一样：备注是已经有了主的一行上的文字，**不删除任何行、不改标题/模式/目录、不新建会话、不派发任何任务**，也无法启动工作（`pendingInDir` 不看它）。在 `approval: 'never'` 下要求审批等于让它每次都失败，而那恰好卡在「干完一步顺手记下下一步要什么」这个循环中间。
+  - **`schedule` 刻意仍然要审批**：定时是让这行**到点自己跑**，这是备注做不到、也不该随手发生的事。两条断言分别钉住「`note` 免审批」与「`schedule` 仍要审批」——合并成一条循环会让将来某个动作在两档之间移动而没有任何测试发现。
+- **「单次回合最多新开会话」变成设置项。** 原来 `MAX_TURN_SESSIONS = 10` 是写死的，而 `MAX_PLAN_ITEMS` 允许一个计划有 **20 步**：一个 20 步、全是 `newSession` 的合法计划，在一次回合结束只能派出一半，**剩下的一半要等下一次回合结束**，而没有任何东西保证下一次会发生——看起来就是卡住了。
+  - 现在它是 `settings.maxTurnSessions`，默认仍是 **10**，范围 **1–50**，面板设置页上可改。
+  - **下界是 1 不是 0**：「永远不开新会话」用 `remind` 模式表达就够了，两个开关说同一件事只会让人猜哪个才算数。
+  - **上界是 50**：这个循环跑在 harness 会 `await` 的 `agent/turn-stopping` 钩子里，开太多会把「一次回合结束」拖成一次长时间卡顿；而队列在每次 spawn 后都会重新扫描，不需要一次开完。
+- **设置页现在有三项数字**：字数、条目数、单次回合最多新开会话。每一项旁边有说明，「单次回合」那条写清了「到上限后剩下的留到下一次回合，不会丢」。
+- **测试。**
+  - `client-smoke` 的 `document` 桩补上 `visibilityState` 与**真实的监听器注册表**（原来 `addEventListener` 是空实现——那会让生产代码「通过」一个它其实从没问过的问题，这个套件以前就栽在这类假桩上）。新增 `poll` 段：页面隐藏后**手动触发所有存活 interval，断言一次请求都没有**；回到前台后断言**立即**有请求。
+  - `smoke` 新增 `cap` 段：合法的 spawn 上限能穿过加载器；`0` 与 `999` 都被钳回默认值。这里踩到一个坑 —— `load()` 只做**内存**钳制、不回写文件（读操作不该写盘），所以断言必须先经一次真实保存再读磁盘。
+  - `check-http` 新增：`maxTurnSessions` 随快照往返、`0` 与 `51` 都被拒绝且不污染已保存的值。
+  - `check-live` 的「拒绝」用例从 `note` 换成 `schedule`——`note` 免审批之后它已经触发不到审批门，继续用它测「拒绝」会变成一条永远为真的断言。
+
+- **面板位置/尺寸改存主机端（`board.json` 的 `layout`），不再只靠 localStorage。**
+  - 根因很具体：**存储按 origin 隔离**。DSH 换个端口重启（`127.0.0.1:41012` → `:25005`），浏览器就当成另一个网站，`localStorage` 读不到——面板于是"忘了"自己停在哪，这正是「重启后回到默认位置」的真正原因。
+  - 现在位置写在板子里，**换端口、换浏览器、重启都保持**。浏览器里仍留一份 localStorage 兜底（路由不可达时用），主机端是加载后的权威值。
+  - 停放成一行时 `w`/`h` 存 `null`：那一行的尺寸由 CSS 按文字宽度决定，写死一个数会让它下次展开时被撑成那个尺寸。
+  - 新增 `layout` action（与 `settings` 分开）：拖一下和提交一张表单是不同手势、不同频率，合并会让一次几何写入顺带承担阈值写入的风险。
+  - 面板在**第一份带 layout 的快照**到达时采用它，之后不再覆盖——轮询每 2.5s 会重发同一个值，每次都应用会与用户的下一次拖动打架两秒。
+- **信任拒绝日志不再刷屏。** 原来「前 20 条记 warn」，而真正在刷屏的是一个固定来源（插件市场 `*.dsh-market.com` 在探测本机路由），于是每次进程启动都产生 20 条一模一样的 warn，把别的日志埋了。
+  - 原来的上限数的是**日志行**，而重复的是**调用方**。现在按 host 聚合：某个 host 的第一条完整记录，后续只累计计数；**新的 host 仍然单独记一条**，聚合不会吞掉新来源。
+  - 实测日志里这条 warn 出现过 **125 次**。
+- **测试。** `check-http` 新增 layout 往返（含 `w/h` 为 `null` 的停放态、非法值拒绝且不落盘、`null` 清空）；`smoke` 新增聚合断言——同一 host 连打 5 次只产生 **1** 条 warn，换一个 host 再产生 1 条。两条都用变异验证过会失败。
+- **README 精简**：487 → 442 行，删掉重复的论证与技术细节，保留使用需要的信息。**可复制的模板代码块逐字未动**（`check-template-parity` 仍绿）。
+
+## 0.13.3
+
+**规划提醒的两个阈值和开关，终于可以自己调了。**
+
+- **问题：这两个数是主观的，却被写死在源码里。** `looksStaged()` 用两个模块常量判断「这条消息像不像分步骤任务」：`PLAN_NUDGE_MIN_CHARS = 200`、`PLAN_NUDGE_MIN_MARKERS = 2`。它们对**每个人**都不同 —— 习惯写长需求的人天天被误报，习惯写短句的人则永远触发不了，而唯一的调节方式是自己改源码。
+- **更关键的是误报的代价被低估了。** 源码注释写「误报的代价只是多问一句」，但提醒是**每个会话只一次**（`planningNudged` 是 WeakSet）。也就是说一次误报**把这个会话的机会花掉了**，不是「多问一句」而是「这次配额没了」。
+- **现在：设置存在板子里，面板上能改。**
+  - `board.json` 新增 `settings: { nudge, minChars, minEntries }`，默认值仍是 `true / 200 / 2`（老文件没有这个字段时自动补上，行为与之前完全一致）。
+  - **面板标题栏新增 ⚒ 按钮**，点开是设置页：一个总开关 + 两个字数字段（**字数**、**条目数**）+ 保存 / 恢复默认。与皮肤、日志按钮同一几何，页面切换也与日志页同构（开一个自动关另一个）。
+  - **关掉开关 = 完全不提醒**，并且**不消耗**那个「每会话一次」的额度；两个数字框在开关关闭时变灰，因为此时它们不影响任何行为 —— 一个明明不起作用的输入框会让人以为它有用。
+  - 合法范围：**字数 10–10000**、**条目数 1–100**。超范围由主机端拒绝，面板显示原因。
+- **写路径复用现有路由**（POST `/dsh-todo-board/api` 的 `settings` action），不新增接口；配置随每次轮询的快照下发，面板无需第二次请求。
+- **实现上两处刻意的选择。**
+  - **先整体校验再落盘**，与 `update` 改行同一条规矩：一个字段非法就整条拒绝，磁盘**一个字节都不变**。边校验边写会让面板显示的值和加载时钳制后的值不一致，用户无从判断哪个是真的。
+  - **`load()` 里逐字段容错**（而不是只在读的时候容错）：手改坏的 `settings` 只会让那一个字段回落默认值，**不会**让整个板子读不出来 —— 一个坏数字赔上全部待办是不成比例的。
+- **新增 `tools/check-nudge-settings-guard.mjs`（进 `npm run guard`，5 个变异体）。** 分别验证：关掉开关仍提醒、字数写死、条目数写死、**校验前就写入**、**快照不携带 settings** —— 后两个只有 `check-http` 能抓，所以变异体各自声明要跑哪个套件。全部实测被抓，源码逐字节还原并复跑验证。
+- **测试。**
+  - `smoke.mjs` 新增五段：关掉开关不提醒、两个阈值各自升高会抑制、两个阈值降低会**产生**本来不会有的提醒、以及默认值仍然会触发（最后一条是为了防止前面几条只是因为功能坏了才通过）。每段都用一个独立的 `DSH_HOME` 起一个**全新的模块实例**，因为 `settings` 只在加载时读一次 —— 拿已加载的插件改文件，测的是文件不是钩子。
+  - `check-http.mjs` 新增：settings 往返能从**面板真正轮询的那个快照**读回、非法值被拒且**快照逐字节不变**、部分更新只改提到的字段。
+  - `client-smoke.mjs` 新增 `settings` 段：按钮存在、开设置会关掉日志页、页签与状态线按日志页的规矩隐藏、开关与数字的初值来自快照、关开关会禁用两个数字框、保存发出去的 `action`/`settings` 形状正确且**数字是 number 不是 draft 的 string**。
+
+## 0.13.2
+
+**适配 DSH 0.2.1-rc.2，并处理与「自动审查」预设的冲突。**
+
+### 一、0.2.1-rc.2 适配：逐项核对后确认无需改代码
+
+- **逐项核对（只读，不改代码）。** 对运行中的 0.2.1-rc.2 用 `cordis_inspect`（Service / Event / Slots 三个 Provider，读**真机注册表**而非只读源码）+ 桌面端 `app.asar` 内源码比对，覆盖插件依赖的全部对外面：
+  - **14 个 host 服务**（`agents` / `attachments` / `llm` / `agentDefaultModel` / `sessionQuery` / `agentPresets` / `systemPrompt` / `skills` / `commands` / `tools` / `webServer` / `approval` / `permissionPresets` / `sessions`）：全在，插件用到的方法签名全部保持兼容。
+  - **4 个 host 事件**（`agent/pre-step`、`agent/turn-stopping`、`tools/pre-execute`、`agent/status`）：全在，签名未变。
+  - **会话格式仍是 v4**（`SESSION_FORMAT_VERSION = 4`，`dsh-session/lib/index.js:56`），0.11.2 的 producer-owned source 适配继续有效。
+  - **`shell.overlay` slot** 仍是 root 作用域 list，注册参数 `{id, order?, label?}` 未变；**`useSessions` 的 store 形状**仍是 `{ids, byId, phase, projectionsBySession}`、仍无 `current` 键，0.11.4 的 `retainedBy.mainView > 0` 推导照旧成立（实测 `dsh-client-ui-layout` 等 bundle 里仍有 `mainView ?? 0`）。
+  - 完整证据与复现命令见 `docs/report-0.2.1-compat.md`（本次新增）。
+- **两个容易误判的点，已留档。**
+  - `sessionQuery.readSurface` 仍在 —— 它是「交接前自动生成摘要」的唯一入口，若被改名会**静默降级**成无摘要交接，所以单独钉住。
+  - `ctx.sessions` 服务在 0.2.1 里**确实没有 `has()`**；但插件 `lib/index.js:1132` 的 `sessions.has()` 是本地的 `Map`（`liveSessions()` 的返回值），**不是服务调用，无此问题**。核查中一度据此误判为不兼容，复核后推翻 —— 服务名与局部变量重名，会让「读代码找不兼容」产生假阳性。
+- **版本门：范围不变，但把「已验证到哪一版」写实。**
+  - `engines.dsh` 与 peer 仍是 `>=0.1.7-rc.2`：语义上本就覆盖 0.2.1-rc.2，本次补充的是**实测证据**而非改数字。
+  - **刻意不加版本上界**。实测（`includePrerelease: true`，与 npm 解析 peer 的选项一致）：`<0.3.0` 能挡 `0.3.0`，却**挡不住 `0.3.0-rc.1`**；要真挡住预发布得写 `<0.3.0-0`，那会把 nightly 通道的用户锁在门外。一个拦不住 next 的上界只是假安慰，代价却是实打实的误伤。
+  - README 的版本表从「1.7 ~ 0.2.0」更新为「1.7 ~ **0.2.1**」，并补上「为什么没有上界」一节。
+
+### 二、与「自动审查」预设的冲突：定位、定级、处置
+
+- **结论：开 Auto 预设时，自动续跑链可能静默中断。** 机理写在 `docs/report-auto-review-conflict.md`（本次新增），一句话版：`dsh-experimental-auto-review` 以 `prepend: true` 挂在**同一条** `tools/pre-execute` waterfall 上，对**每次**工具调用先做一次 LLM 风险评估；`done` 虽然免本插件的审批，却仍要过这道审查，一旦判 medium 且审批档为 `never`，**直接拒绝且不询问用户** —— 而 `done` 正是「干完接下一件」这条链的燃料。
+- **更正一个我先前说错的判断：「会连弹两次审批框」不成立。** `tools/pre-execute` 是**一条** waterfall，`dsh-tools` 只对**最终**裁决调用一次 `serviceAsk()`（`dsh-tools/lib/index.js:3321-3323`、`:3535`）。两个监听器是同一条链上的两节，不是两道闸门。所以不存在双弹窗；真正的信息丢失在另一处：auto-review 判 deny 而下游是 `ask` 时，它**原样返回下游裁决**（`ar-index.js:482`），于是审查的拒绝理由**不会**出现在审批框里。
+- **处置（只做不越界的两件事）。**
+  - **把 `done` / `reopen` 的实际效果写进工具描述**：「只翻转一个布尔、不删除任何行、不改写标题或备注、不新建会话、不派发任务」。审查模型按效果分级、且**能读到工具描述**（`nativeAction` → `schema.description`），这是插件对这一分类唯一正当的杠杆。
+  - **README 增加「该用哪个权限预设」一节**：三个预设的 `(sandbox, approval)` 对照表 + 各自阻塞的原因，**推荐 `workspace-write`**。**明说这是上游安全层的设计限制，不是插件能绕开的**，并拒绝了「改工具名 / 拆动作 / 抢 waterfall 顺序」这三类会削弱安全边界的做法。
+- **实测更正一条容易踩反的结论：`danger-full-access` 是三个预设里最差的那个，不是最好的。**
+  - 把会话切到 `never` 后调用 `todo_board action=add`，返回 `Error: the user rejected tool "todo_board"`，**全程没有任何弹窗**。
+  - 机理：`dsh-user-approval` 的 `decide()` 第一句就是 `if (effectivePolicy(session) === 'never') return 'rejected'` —— **`never` 的语义是「不问，直接拒」，不是「一律放行」**；`dsh-tools` 的 `serviceAsk()` 再把 `rejected` 翻成 `deny`。那句 "the user rejected" 是标准措辞，**不是用户真的点了拒绝**。
+  - 所以对一个**依赖审批通道做写操作**的插件来说：`danger-full-access` = 写操作全废（`list`/`done`/`reopen` 还能用），`auto` = `done` 可能被审查拦，**只有 `workspace-write` 两边都通**。
+  - README 与 `docs/report-auto-review-conflict.md` §七点一 同步写入该实测与「为什么不存在『自动审查 + never』组合」（`AUTO_PRESET_SPEC` 固定是 `{sandbox: danger-full-access, approval: ask}`，预设是二元组，`ask` 是 `auto` 的一部分）。
+- **新增回归守卫 `tools/check-autoreview-guard.mjs`（进 `npm run guard`，3 个变异体）。** 钉住两件在别处没人守的事：`done` / `reopen` **必须保持免审批**（有人为了"适配审查"把豁免拿掉，链子会断，守卫会红），以及描述里那句效果说明**不能被删**。实测三个变异全部被抓，源码逐字节还原。
+  - `tools/smoke.mjs` 同步新增 `autorev` 段（豁免断言 + 描述文案断言）。
+
+### 三、真机验证（0.2.1-rc.2）
+
+- **不再用全局 0.1.7-rc.2 冒充目标运行时。** 用桌面端自带的 Electron（`ELECTRON_RUN_AS_NODE=1`）直接加载 `app.asar` 内的运行时，命令与结果写进 `docs/report-0.2.1-compat.md` §九。
+- `tools/check-live.mjs` 在真 **cordis 4.0.5 / dsh-tools 0.2.1-rc.2** 上 8 项全绿：插件激活、晚到服务仍注册（0.9.1 的竞态没回退）、skill/command 在插件行之后注册、工具 schema 过 harness 校验、logger levels 门控、审批门 deny/grant、路由围栏、借用 harness 的 connection 门。
+- `tools/check-session-format.mjs` 在真 **dsh-session 0.2.1-rc.2** 上：4 条注入路径全部通过 `adoptSessionEvent()`，裸字符串反例仍被拒（守卫没变空）。
+- 其余套件：`smoke` 13 段、`client-smoke` 全绿、`retry-loop`、`check-http`、`check-fence-parity`（72 条）、`check-template-parity` 全绿；`npm run guard` 现为 **clamp 3 + row 44 + host 18 + autorev 3 = 68 个变异体全部被抓**。
+
 ## 0.13.1
 
 **修复：开出的新会话自己那一页看不到自己的待办（计数 3、行数 0）。**

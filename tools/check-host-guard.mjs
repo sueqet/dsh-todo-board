@@ -163,15 +163,18 @@ const mutants = [
     to: "      if (false) {\n        const titles = input.items.map((entry, at) => {",
   },
   {
+    // 0.13.3 made these thresholds board settings, so the anchors read
+    // `settings.*` now. The two mutants below are unchanged in INTENT — "dead
+    // code" and "fires on anything" — only their anchor moved.
     name: 'the planning offer never fires (the nudge is dead code)',
     suite: 'tools/smoke.mjs',
-    from: '    return hits >= PLAN_NUDGE_MIN_MARKERS',
+    from: '    return hits >= settings.minEntries',
     to: '    return false',
   },
   {
     name: 'the planning offer fires on anything long (it becomes noise)',
     suite: 'tools/smoke.mjs',
-    from: '    if (body.length < PLAN_NUDGE_MIN_CHARS) return false',
+    from: '    if (body.length < settings.minChars) return false',
     to: '    if (false) return false',
   },
   {

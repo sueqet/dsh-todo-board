@@ -143,6 +143,137 @@ try {
   assert.ok(after.text.includes('真实 HTTP 写入'), 'the created row is readable back')
   assert.ok(!after.text.includes('"logs"'), 'and the idle poll still carries no log content')
 
+  // -- settings: the round trip, and the rejection that must not write -------
+  //
+  // The panel's settings page is a thin client over this action, so the two
+  // things that matter are (a) a valid write is readable back off the SAME
+  // snapshot the panel polls, and (b) an invalid one is refused AND leaves the
+  // board untouched. (b) is the one worth pinning: "validate then write" is
+  // easy to get wrong by clamping as you go, and a half-applied settings object
+  // makes the panel show values the loader will silently change later.
+  const setOk = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({
+      action: 'settings',
+      settings: { nudge: false, minChars: 321, minEntries: 4, maxTurnSessions: 25 },
+    }),
+  })
+  assert.equal(setOk.status, 200, 'a settings POST is served')
+  const setOkBody = JSON.parse(setOk.text)
+  assert.equal(setOkBody.ok, true, 'settings accepted: ' + setOk.text)
+  const snap = await status('/dsh-todo-board/api')
+  const snapBody = JSON.parse(snap.text)
+  assert.equal(snapBody.settings.nudge, false, 'the snapshot carries the saved nudge switch')
+  assert.equal(snapBody.settings.minChars, 321, 'the snapshot carries the saved 字数')
+  assert.equal(snapBody.settings.minEntries, 4, 'the snapshot carries the saved 条目数')
+  assert.equal(
+    snapBody.settings.maxTurnSessions,
+    25,
+    'and the saved spawn cap — the setting that MAX_PLAN_ITEMS can outrun',
+  )
+
+  const beforeBad = (await status('/dsh-todo-board/api')).text
+  const setBad = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'settings', settings: { nudge: true, minChars: 999999 } }),
+  })
+  const setBadBody = JSON.parse(setBad.text)
+  assert.equal(setBadBody.ok, false, 'an out-of-range 字数 is refused: ' + setBad.text)
+  const afterBad = (await status('/dsh-todo-board/api')).text
+  assert.equal(afterBad, beforeBad, 'and a refused settings write changes NOTHING (not even the bad field)')
+
+  // The spawn cap has its own range: 0 would mean "never spawn", which mode
+  // `remind` already expresses, and a huge number would stall the turn-stopping
+  // hook the harness awaits.
+  const capBad = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'settings', settings: { maxTurnSessions: 0 } }),
+  })
+  assert.equal(JSON.parse(capBad.text).ok, false, 'a spawn cap of 0 is refused')
+  const capHigh = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'settings', settings: { maxTurnSessions: 51 } }),
+  })
+  assert.equal(JSON.parse(capHigh.text).ok, false, 'and so is one above the range')
+  const capAfter = JSON.parse((await status('/dsh-todo-board/api')).text)
+  assert.equal(capAfter.settings.maxTurnSessions, 25, 'neither refusal disturbed the saved cap')
+
+  // -- layout: the panel's parking spot follows the deployment, not the origin --
+  //
+  // This moved out of localStorage in 0.13.4 because storage is keyed by ORIGIN:
+  // restarting DSH on a different port made the panel forget where it was
+  // parked. The host copy is the durable one the panel adopts on load.
+  const savedLayout = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'layout', layout: { x: 123, y: 45, w: 420, h: 380 } }),
+  })
+  assert.equal(JSON.parse(savedLayout.text).ok, true, 'a layout write is accepted')
+  const layoutSnap = JSON.parse((await status('/dsh-todo-board/api')).text)
+  assert.deepEqual(
+    layoutSnap.layout,
+    { x: 123, y: 45, w: 420, h: 380 },
+    'the snapshot carries the parked geometry back',
+  )
+
+  // A parked LINE has no meaningful w/h: those are null, and must round-trip as
+  // null rather than being invented (a stored 0 would collapse the card).
+  await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'layout', layout: { x: 10, y: 20, w: null, h: null } }),
+  })
+  const parkedSnap = JSON.parse((await status('/dsh-todo-board/api')).text)
+  assert.deepEqual(
+    parkedSnap.layout,
+    { x: 10, y: 20, w: null, h: null },
+    'a parked line stores no size, and gets none invented',
+  )
+
+  // Garbage is refused outright rather than stored as NaN.
+  const badLayout = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'layout', layout: { x: 'left', y: 20 } }),
+  })
+  assert.equal(JSON.parse(badLayout.text).ok, false, 'a layout without numeric x/y is refused')
+  const stillParked = JSON.parse((await status('/dsh-todo-board/api')).text)
+  assert.deepEqual(stillParked.layout, { x: 10, y: 20, w: null, h: null }, 'and nothing changed')
+
+  // Clearing is how "reset to the default corner" is expressed.
+  await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'layout', layout: null }),
+  })
+  const cleared = JSON.parse((await status('/dsh-todo-board/api')).text)
+  assert.equal(cleared.layout, null, 'a null layout clears the preference')
+
+  // A partial patch keeps the fields it did not mention.
+  const partial = await rawRequest('/dsh-todo-board/api', {
+    method: 'POST',
+    host: '127.0.0.1:' + port,
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    body: JSON.stringify({ action: 'settings', settings: { minEntries: 9 } }),
+  })
+  assert.equal(JSON.parse(partial.text).ok, true, 'a partial settings patch is accepted')
+  const partialSnap = JSON.parse((await status('/dsh-todo-board/api')).text)
+  assert.equal(partialSnap.settings.minEntries, 9, 'the patched field changed')
+  assert.equal(partialSnap.settings.minChars, 321, 'the fields it omitted are untouched')
+  assert.equal(partialSnap.settings.nudge, false, 'including the switch')
+
   // -- channel convergence: a local shell client can no longer write ---------
   //
   // Everything above ran WITHOUT a `connection` service, so it also pins the

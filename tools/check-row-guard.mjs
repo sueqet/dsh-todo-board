@@ -221,9 +221,20 @@ const mutants = [
     to: "      if (false) return current",
   },
   {
-    name: 'the log poll reads logOpen from a stale closure (the open view freezes)',
-    from: '    if (logOpenRef.current) refreshLogs()',
-    to: '    if (logOpen) refreshLogs()',
+    // v0.13.4 rewrote the poll effect (it suspends while the page is hidden).
+    // The stale-`logOpen` bug this mutant used to guard is now UNREACHABLE:
+    // `refresh` is invoked through `refreshRef`, which is re-assigned on every
+    // render, so the callback the interval runs always sees current state.
+    // Keeping the old mutation would have produced a permanent "NOT CAUGHT"
+    // entry — an assertion that can no longer fail reads like coverage while
+    // providing none.
+    //
+    // The risk that REPLACED it is the interval not being armed at all once
+    // the visibility logic exists: a page that starts visible must start
+    // polling, and the new tests drive exactly that.
+    name: 'polling is never armed on mount (the panel only fetches once)',
+    from: '    if (visible()) start()',
+    to: '    if (false) start()',
   },
   {
     // v0.9.1: the board route borrows the harness gate, so a missing browser
@@ -259,7 +270,7 @@ const mutants = [
     // a folded-away build marker and open count are a lie by omission.
     name: 'the status line is hidden again (build marker and open count disappear)',
     from:
-      '      logOpen\n' +
+      '      logOpen || settingsOpen\n' +
       '        ? null\n' +
       '        : h(\n' +
       "            'div',\n" +

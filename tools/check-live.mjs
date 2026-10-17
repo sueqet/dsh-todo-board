@@ -392,14 +392,19 @@ assert.equal(approvalCalls.length, 1, 'and it did not ask')
 
 // A rejection is the harness's own verdict wording, which is how the model can
 // tell "the human said no" from "there is no approval channel at all".
+//
+// The write used here must be one that still ASKS. `note` was the obvious pick
+// until 0.13.4 moved it into the approval-free set (a note is prose on a row
+// the user already owns); `schedule` stayed gated precisely because it makes
+// the row run later with nobody watching, so it is the honest probe.
 approvalVerdict = 'rejected'
-const rejected = await callTool({ action: 'note', id: firstId, note: 'x' })
+const rejected = await callTool({ action: 'schedule', id: firstId, schedule: '2099-01-01T00:00' })
 assert.equal(rejected.isError, true, 'a rejection denies the write')
 assert.ok(
   String(rejected.error?.message ?? '').includes('rejected'),
   'with the user-rejection wording, not ours: ' + rejected.error?.message,
 )
-console.log('live-gate OK — reads and the AI checkbox pass, writes ask, deny/grant both honoured')
+console.log('live-gate OK — reads and the cheap marks pass, writes ask, deny/grant both honoured')
 
 // -- the fence on a really-injected route ------------------------------------
 

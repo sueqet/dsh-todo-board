@@ -130,6 +130,13 @@ const listeners = []
  * without the ability to fire the tick.
  */
 const intervals = []
+/** Ids of the intervals the component has cleared; `setInterval` returns its id. */
+const clearedIntervals = new Set()
+
+/** The callbacks that are still live (registered and not cleared). */
+function liveTicks() {
+  return intervals.filter((_, index) => !clearedIntervals.has(index + 1))
+}
 
 globalThis.window = {
   localStorage: {
@@ -138,7 +145,9 @@ globalThis.window = {
     removeItem: (key) => storage.delete(key),
   },
   setInterval: (fn) => (intervals.push(fn), intervals.length),
-  clearInterval: () => {},
+  clearInterval: (id) => {
+    clearedIntervals.add(id)
+  },
   // The log view uses this to clear its transient "已复制" note; without it the
   // copy/export paths would throw instead of merely being untested.
   setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -161,9 +170,36 @@ function resizeTo(width, height) {
   return fired.length
 }
 
+/** Listeners registered on the document stub, by event name. */
+const documentListeners = new Map()
+
+/** Flip the stubbed page between visible and hidden, and fire the listeners. */
+function setVisibility(state) {
+  globalThis.document.visibilityState = state
+  for (const listener of documentListeners.get('visibilitychange') ?? []) {
+    listener({ type: 'visibilitychange' })
+  }
+}
+
 globalThis.document = {
   querySelector: () => null,
   querySelectorAll: () => [],
+  // The poll effect suspends its interval while the page is hidden, so the
+  // stub has to model BOTH halves of that contract: a visibility state to read
+  // and a listener registry to fire. A stub that only answered
+  // `addEventListener` with a no-op would let the production code pass while
+  // never actually stopping the timer — the exact class of "test answers a
+  // question production never asks" this suite has been bitten by before.
+  visibilityState: 'visible',
+  addEventListener: (event, listener) => {
+    const set = documentListeners.get(event) ?? new Set()
+    set.add(listener)
+    documentListeners.set(event, set)
+  },
+  removeEventListener: (event, listener) => {
+    const set = documentListeners.get(event)
+    if (set !== undefined) set.delete(listener)
+  },
   createElement: (tag) => {
     const attrs = {}
     const node = {
@@ -367,7 +403,12 @@ const logInfo = { cursor: 50, truncated: false, dropped: 0, file: 'D:\\DSH\\dsh-
  */
 let unauthorized = false
 
+/** Counts EVERY request, GET and POST alike — the poll is a GET, so `calls`
+ *  (which only records POST bodies) cannot answer "did it fetch?". */
+const fetchCount = { value: 0 }
+
 globalThis.fetch = async (url, options) => {
+  fetchCount.value += 1
   const target = String(url)
   if (unauthorized) return { ok: false, status: 401, json: async () => ({ ok: false }) }
   if (target.includes('logs=1')) {
@@ -462,8 +503,19 @@ function findByClass(node, className) {
   return out
 }
 
-function textOf(node) {
-  if (typeof node === 'string' || typeof node === 'number') return String(node)
+/** Every node whose props satisfy `predicate`; the generic sibling of the above. */
+function findWhere(node, predicate) {
+  const out = []
+  const walk = (current) => {
+    if (current === null || current === undefined || typeof current !== 'object') return
+    if (current.props !== undefined && current.props !== null && predicate(current.props)) out.push(current)
+    if (Array.isArray(current.children)) for (const child of current.children) walk(child)
+  }
+  walk(node)
+  return out
+}
+
+function textOf(node) {  if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (node === null || node === undefined || typeof node !== 'object') return ''
   return node.children.map(textOf).join('')
 }
@@ -2117,6 +2169,121 @@ assert.ok(
 )
 
 console.log('logs    OK')
+
+// ------------------------------------------------------- settings page (v0.13.3)
+//
+// The planning-nudge knobs are the one place a user edits how the plugin
+// behaves, and the host validates the same values on the way in. Three things
+// are worth pinning here, because each one has a plausible way to be wrong:
+//
+//   1. the button exists in the header and opens a PAGE (not a drawer over the
+//      board), closing the log page if it was open — two pages at once is a
+//      state the layout has no answer for;
+//   2. the two numbers are STRINGS in the draft, so an empty field stays empty
+//      instead of silently becoming 0;
+//   3. saving sends `{ settings: { nudge, minChars, minEntries } }` through the
+//      same `call()` every other panel write uses.
+assert.equal(findByClass(tree, 'dshtb-logview').length, 1, 'the log page is still open from the cases above')
+
+// Opening settings from the log page must CLOSE it: the two are both
+// replacements for the board body, and two at once is a state with no answer.
+const settingsButton = findByClass(tree, 'dshtb-settings')[0]
+assert.ok(settingsButton !== undefined, 'the header offers a settings button')
+tree = click(settingsButton)
+assert.equal(findByClass(tree, 'dshtb-logview').length, 0, 'opening settings closed the log page')
+assert.equal(findByClass(tree, 'dshtb-settingsview').length, 1, 'and the settings page is shown')
+assert.equal(
+  findByClass(tree, 'dshtb-seg').length,
+  0,
+  'the scope tabs are hidden while the settings page is open',
+)
+assert.equal(
+  findByClass(tree, 'dshtb-foot').length,
+  0,
+  'and the status line is hidden too, exactly like the log page',
+)
+
+const nudgeToggle = findWhere(tree, (props) => props.type === 'checkbox' && props['aria-label'] === '长任务主动提醒我拆分')[0]
+assert.ok(nudgeToggle !== undefined, 'the page offers an on/off switch')
+assert.equal(nudgeToggle.props.checked, true, 'the switch starts from the saved value (on)')
+
+const numbers = findByClass(tree, 'dshtb-setnum')
+assert.equal(numbers.length, 3, 'and three number inputs: 字数, 条目数 and 单次回合最多新开会话')
+assert.equal(numbers[0].props.value, '200', '字数 starts from the saved value, as a string')
+assert.equal(numbers[1].props.value, '2', '条目数 starts from the saved value, as a string')
+assert.equal(
+  numbers[2].props.value,
+  '10',
+  'and the spawn cap starts from its saved value — the default that MAX_PLAN_ITEMS can outrun',
+)
+
+// Turning the switch off disables both numbers: a threshold nobody can reach
+// while the feature is off is a field that lies about mattering.
+nudgeToggle.props.onChange({ target: { checked: false } })
+tree = render()
+const numbersOff = findByClass(tree, 'dshtb-setnum')
+assert.equal(numbersOff[0].props.disabled, true, 'turning the switch off disables 字数')
+assert.equal(numbersOff[1].props.disabled, true, 'and 条目数')
+
+// Saving goes through the SAME `call()` every other panel write uses, with the
+// three fields under `settings` — the host's `saveSettings` reads exactly that
+// shape, so a rename here would be a panel that silently does nothing.
+const callsBefore = calls.length
+const saveButton = findByClass(tree, 'dshtb-setbtn').find((n) => textOf(n).includes('保存'))
+assert.ok(saveButton !== undefined, 'the page offers a 保存 button')
+saveButton.props.onClick({ preventDefault() {}, stopPropagation() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+const settingsCalls = calls.slice(callsBefore).filter((c) => c !== null && typeof c === 'object' && c.action === 'settings')
+assert.equal(settingsCalls.length, 1, 'saving posts exactly one settings action')
+assert.equal(settingsCalls[0].settings.nudge, false, 'the payload carries the switch')
+assert.equal(settingsCalls[0].settings.minChars, 200, 'and 字数 as a NUMBER, not the draft string')
+assert.equal(settingsCalls[0].settings.minEntries, 2, 'and 条目数 as a number too')
+assert.equal(
+  settingsCalls[0].settings.maxTurnSessions,
+  10,
+  'and the spawn cap, also as a number — a string here would be rejected by the host',
+)
+tree = render()
+
+console.log('settings OK')
+
+// ------------------------------------------------- polling visibility (v0.13.3)
+//
+// The panel used to poll every 2.5s unconditionally — including while the tab
+// was hidden, where nothing reads the result. The fix suspends the interval and
+// re-arms it on return. Both halves are asserted here, because either one alone
+// is a plausible half-fix: stopping without re-arming freezes the panel on
+// return, and re-arming without an immediate refresh shows stale data for a
+// whole tick.
+{
+  // Counting intervals is unreliable here: other effects install their own.
+  // What actually matters is BEHAVIOUR — while hidden the poll must not fetch,
+  // and on return it must fetch right away.
+  const hiddenCallsBefore = fetchCount.value
+  setVisibility('hidden')
+  // Fire only the intervals that are still live. A suspended poll has had its
+  // interval cleared, so it contributes no callback here — which is exactly the
+  // property under test.
+  for (const tick of liveTicks()) tick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const fetchedWhileHidden = fetchCount.value - hiddenCallsBefore
+  assert.equal(
+    fetchedWhileHidden,
+    0,
+    'a hidden page does not fetch (the interval is suspended, not merely slowed)',
+  )
+
+  const visibleCallsBefore = fetchCount.value
+  setVisibility('visible')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(
+    fetchCount.value > visibleCallsBefore,
+    'and it fetches IMMEDIATELY on return rather than waiting out a tick',
+  )
+  tree = render()
+  console.log('poll    OK')
+}
+
 
 // -- v0.9.1: a refused poll explains itself ----------------------------------
 //

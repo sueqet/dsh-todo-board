@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -347,12 +347,14 @@ function gate(action, extra) {
   return allowed ? 'allow' : decision
 }
 
-for (const action of ['list', 'done', 'reopen']) {
-  assert.equal(gate(action, { id: 'x' }), 'allow', action + ' is not gated')
+// 0.13.4 moved `note` into the approval-free set. The two lists are asserted
+// SEPARATELY on purpose: a single merged loop would let a future edit move an
+// action between them without any test noticing.
+for (const action of ['list', 'done', 'reopen', 'note']) {
+  assert.equal(gate(action, { id: 'x', note: 'n' }), 'allow', action + ' is not gated')
 }
 for (const [action, extra] of [
   ['add', { title: 'AI 自建的一条', mode: 'resume' }],
-  ['note', { id: 'x', note: 'n' }],
   ['schedule', { id: 'x', schedule: '2030-01-01T00:00' }],
   ['update', { id: 'x' }],
   ['reorder', {}],
@@ -366,6 +368,17 @@ for (const [action, extra] of [
     action + ' carries a reason the approval dialog can show',
   )
 }
+
+// `schedule` stays gated even though `note` does not: a note is prose the user
+// already owns, while a schedule makes the row run later with nobody watching.
+// Two ways to say "please ask me first" would be one too many, so the
+// distinction is pinned rather than left to the comment above.
+assert.equal(gate('note', { id: 'x', note: 'n' }), 'allow', 'note stays approval-free')
+assert.equal(
+  gate('schedule', { id: 'x', schedule: '2030-01-01T00:00' }).kind,
+  'ask',
+  'but schedule is still gated — it is the one thing a note cannot do',
+)
 assert.ok(
   gate('add', { title: 'AI 自建的一条', mode: 'resume' }).reason.includes('resume') &&
     gate('add', { title: 'AI 自建的一条', mode: 'resume' }).reason.includes('自动派发'),
@@ -382,6 +395,43 @@ assert.ok(
   'the reorder reason says how many rows move',
 )
 assert.equal(gate(undefined, {}), 'allow', 'a malformed call defaults to list, exactly like the tool body')
+
+// ---------------------------------------------------------------------------
+// Auto-review compatibility pin (v0.13.2).
+//
+// `dsh-experimental-auto-review` is an LLM-backed gate that runs BEFORE ours on
+// the same `tools/pre-execute` waterfall (`prepend: true`). It classifies a
+// pending call by its ACTUAL EFFECTS and reads the tool description from the
+// request header to do it. Two things must therefore stay true, and neither is
+// enforced anywhere else:
+//
+//   1. `done` / `reopen` stay approval-free. Making them ask would break the
+//      auto-continue loop under `approval: 'never'` — that is the whole reason
+//      they are exempt. A future "adapter" must not quietly trade this away.
+//   2. The description keeps stating what those two actions DO in effect
+//      terms. That sentence is the only lever this plugin has over how the
+//      reviewer classifies the call.
+//
+// This pins the contract, not the reviewer: it cannot promise the reviewer
+// allows anything. See docs/report-auto-review-conflict.md.
+for (const action of ['done', 'reopen']) {
+  assert.equal(
+    gate(action, { id: 'x' }),
+    'allow',
+    action + ' must stay approval-free even under an LLM review preset (the auto-continue loop depends on it)',
+  )
+}
+
+const toolDescription = registered.tool.description
+assert.ok(
+  toolDescription.includes('done 只把该行标记为「AI 已完成」'),
+  'the description states what done actually does (the reviewer classifies by effect)',
+)
+assert.ok(
+  toolDescription.includes('不删除任何行'),
+  'the description says the checkbox actions delete nothing (the reviewer needs the negative too)',
+)
+console.log('autorev OK')
 
 // Another plugin's tools are none of our business: the gate must pass them on.
 let passedOn = false
@@ -927,6 +977,46 @@ assert.equal(
   403,
   'a rebound attacker domain is refused',
 )
+
+// -- refusals are aggregated per host, not capped per process ---------------
+//
+// The old rule logged the first 20 refusals and then went quiet. That assumed
+// the noise came from twenty DIFFERENT requests; what actually happens is that
+// one caller (the plugin market) probes every local route on a loop, so each
+// process start produced twenty identical lines that buried everything else.
+//
+// The fix keys on the requesting host: the first refusal from a host is logged
+// in full, repeats only bump a counter. Asserted by counting the warning lines
+// the logger actually received, because "it returned 403 either way" cannot
+// tell the two designs apart.
+{
+  const refusalWarns = () =>
+    loggerStub.calls.filter(
+      (call) => call.type === 'warn' && String(call.args[0]).includes('拒绝了未通过信任校验的请求'),
+    ).length
+  const before = refusalWarns()
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(
+      await readStatus(apiRoute, { method: 'GET', headers: { host: 'market.example:3080' } }),
+      403,
+      'an untrusted host is refused every time',
+    )
+  }
+  assert.equal(
+    refusalWarns() - before,
+    1,
+    'but five refusals from ONE host produce ONE warning, not five',
+  )
+
+  // A different host is still news — aggregation must not swallow new callers.
+  const afterFirst = refusalWarns()
+  assert.equal(
+    await readStatus(apiRoute, { method: 'GET', headers: { host: 'another.example:3080' } }),
+    403,
+    'a second untrusted host is refused too',
+  )
+  assert.equal(refusalWarns() - afterFirst, 1, 'and a NEW host gets its own first warning')
+}
 assert.equal(
   await readStatus(apiRoute, {
     method: 'GET',
@@ -1776,6 +1866,95 @@ await registered.tool.execute({ action: 'add', title: '正在做的', dir: NUDGE
 after = await viaPreStep(nudgeAgent(NUDGE_DIR), [userMessage(staged)])
 assert.equal(after.length, 1, 'a directory that already has todos is not offered planning again')
 
+// ------------------------------------------------- the settings that bound it
+//
+// The thresholds used to be module constants, which made "this looks
+// multi-stage" a question about whoever last edited the source. They are board
+// settings now — and a setting nobody honours is worse than no setting at all.
+//
+// `settings` is read once per load(), so each case boots a FRESH module against
+// its own DSH_HOME carrying its own board.json. That is the only honest way to
+// drive the live wiring: patching the file of an already-loaded plugin would
+// test the file, not the hook.
+//
+// Both directions are covered. Raising a threshold must SUPPRESS an offer the
+// defaults would produce; lowering it must PRODUCE one they would not — a test
+// that only proves "raising suppresses" would still pass if the code ignored
+// the settings and simply never fired.
+
+/** Boot an isolated plugin instance whose board.json carries `settings`. */
+async function bootWithSettings(settings, cwd) {
+  const isolatedHome = mkdtempSync(join(tmpdir(), 'dshtb-nudge-'))
+  mkdirSync(join(isolatedHome, 'todo-board'), { recursive: true })
+  writeFileSync(
+    join(isolatedHome, 'todo-board', 'board.json'),
+    JSON.stringify({ version: 1, seq: 0, todos: [], settings }, null, 2),
+  )
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = isolatedHome
+  const mod = await import('../lib/index.js?settings=' + Date.now() + Math.random())
+  const seen = { listeners: [] }
+  const ownCtx = {
+    root: undefined,
+    webServer: { register: () => () => {} },
+    get: (key) => (key === 'tools' ? { register() { return () => {} } } : undefined),
+    on(event, listener) { seen.listeners.push({ event, listener }); return () => {} },
+    effect: (cb) => { const d = cb(); return typeof d === 'function' ? d : () => {} },
+    inject: (names, cb) => cb(ownCtx),
+    logger: { exporter: () => () => {}, error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
+  }
+  mod.apply(ownCtx)
+  process.env.DSH_HOME = previousHome
+  const hook = seen.listeners.find((entry) => entry.event === 'agent/pre-step')
+  assert.ok(hook !== undefined, 'the hook registers in the isolated instance')
+  return {
+    /** Run one user message through THIS instance's real hook. */
+    async run(text) {
+      const messages = [userMessage(text)]
+      const downstream = { kind: 'enter', messages }
+      const out = await hook.listener({ agent: nudgeAgent(cwd), messages }, () => Promise.resolve(downstream))
+      rmSync(isolatedHome, { recursive: true, force: true })
+      return out === undefined || out === null ? messages : out.messages
+    },
+  }
+}
+
+// The off switch: nudge:false must not offer, even for a fixture that fires at
+// the defaults.
+{
+  const off = await bootWithSettings({ nudge: false, minChars: 200, minEntries: 2 }, 'D:\\smoke\\nudge-off')
+  assert.equal((await off.run(staged)).length, 1, 'nudge:false suppresses the offer entirely')
+}
+
+// Raising minEntries suppresses: `staged` is long enough, but its markers are
+// nowhere near 50.
+{
+  const high = await bootWithSettings({ nudge: true, minChars: 200, minEntries: 50 }, 'D:\\smoke\\nudge-high')
+  assert.equal((await high.run(staged)).length, 1, 'a raised minEntries suppresses the offer')
+}
+
+// Raising minChars suppresses: the fixture is ~400 chars, nowhere near 5000.
+{
+  const longer = await bootWithSettings({ nudge: true, minChars: 5000, minEntries: 2 }, 'D:\\smoke\\nudge-long')
+  assert.equal((await longer.run(staged)).length, 1, 'a raised minChars suppresses the offer')
+}
+
+// Lowering BOTH produces an offer the defaults would not: this fixture is short
+// and has exactly the markers the defaults already require.
+{
+  const shortStaged = ['1. 第一步', '2. 第二步'].join('\n')
+  assert.ok(shortStaged.length < 200, 'the low-threshold fixture really is shorter than the default')
+  const low = await bootWithSettings({ nudge: true, minChars: 10, minEntries: 1 }, 'D:\\smoke\\nudge-low')
+  assert.equal((await low.run(shortStaged)).length, 2, 'lowered thresholds produce an offer the defaults would not')
+}
+
+// The defaults themselves still fire, so the cases above are not proving that
+// the feature is simply broken.
+{
+  const normal = await bootWithSettings({ nudge: true, minChars: 200, minEntries: 2 }, 'D:\\smoke\\nudge-normal')
+  assert.equal((await normal.run(staged)).length, 2, 'the default thresholds still produce an offer')
+}
+
 // Tool results and injected notices must never trigger the offer — the plugin
 // would otherwise be talking to itself.
 after = await viaPreStep(nudgeAgent('D:\\smoke\\nudge2'), [
@@ -1783,6 +1962,97 @@ after = await viaPreStep(nudgeAgent('D:\\smoke\\nudge2'), [
 ])
 assert.equal(after.length, 1, 'a tool result is not a user request')
 console.log('nudge   OK')
+
+// ------------------------------------------- the per-turn spawn cap (0.13.4)
+//
+// `MAX_TURN_SESSIONS` used to be a module constant, which meant a plan allowed
+// to be twenty steps long could only half-dispatch at one turn end — and
+// nothing guaranteed a "next turn". It reads `board.settings` now.
+//
+// Driving the WHOLE loop would need ten-plus real spawns per case; what can
+// actually go wrong is narrower than that, and cheaper to pin: the loop reads a
+// saved setting, and the write path refuses a value outside the range. Both are
+// asserted here against an isolated instance, because `settings` is read at
+// load() time.
+{
+  const capHome = mkdtempSync(join(tmpdir(), 'dshtb-cap-'))
+  mkdirSync(join(capHome, 'todo-board'), { recursive: true })
+  writeFileSync(
+    join(capHome, 'todo-board', 'board.json'),
+    JSON.stringify(
+      { version: 1, seq: 0, todos: [], settings: { nudge: true, minChars: 200, minEntries: 2, maxTurnSessions: 3 } },
+      null,
+      2,
+    ),
+  )
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = capHome
+  const capMod = await import('../lib/index.js?cap=' + Date.now() + Math.random())
+  const capRegistered = { listeners: [], tool: null }
+  const capCtx = {
+    root: undefined,
+    webServer: { register: () => () => {} },
+    get: (key) => (key === 'tools' ? { register(def) { capRegistered.tool = def; return () => {}; } } : undefined),
+    on(event, listener) { capRegistered.listeners.push({ event, listener }); return () => {} },
+    effect: (cb) => { const d = cb(); return typeof d === 'function' ? d : () => {} },
+    inject: (names, cb) => cb(capCtx),
+    logger: { exporter: () => () => {}, error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
+  }
+  capMod.apply(capCtx)
+  // Force a save through the tool so the in-memory settings land on disk;
+  // `load()` alone must not rewrite the file.
+  await capRegistered.tool.execute(
+    { action: 'add', title: 'cap probe', mode: 'remind' },
+    { agent: { session: { header: { cwd: 'D:\\smoke\\cap' } }, id: 'sess-cap' } },
+  )
+  process.env.DSH_HOME = previousHome
+
+  // The saved value is what the loader kept; a bad one would have been clamped.
+  const savedCap = JSON.parse(readFileSync(join(capHome, 'todo-board', 'board.json'), 'utf8')).settings
+  assert.equal(savedCap.maxTurnSessions, 3, 'a saved spawn cap survives the loader')
+
+  // And the loader CLAMPS rather than trusting: 0 (never spawn) and 999 (stall
+  // the turn hook) both come back as the default. The clamp is IN MEMORY —
+  // `load()` must not rewrite the file just for reading it — so the way to
+  // observe it is to force a real save and read that back.
+  for (const [given, label] of [[0, 'zero'], [999, 'far too large']]) {
+    const clampHome = mkdtempSync(join(tmpdir(), 'dshtb-cap-clamp-'))
+    mkdirSync(join(clampHome, 'todo-board'), { recursive: true })
+    writeFileSync(
+      join(clampHome, 'todo-board', 'board.json'),
+      JSON.stringify(
+        { version: 1, seq: 0, todos: [], settings: { nudge: true, minChars: 200, minEntries: 2, maxTurnSessions: given } },
+        null,
+        2,
+      ),
+    )
+    const prev = process.env.DSH_HOME
+    process.env.DSH_HOME = clampHome
+    const m = await import('../lib/index.js?capclamp=' + Date.now() + Math.random())
+    const reg = { tool: null }
+    const c = {
+      root: undefined,
+      webServer: { register: () => () => {} },
+      get: (k) => (k === 'tools' ? { register(def) { reg.tool = def; return () => {}; } } : undefined),
+      on: () => () => {},
+      effect: (cb) => { const d = cb(); return typeof d === 'function' ? d : () => {} },
+      inject: (names, cb) => cb(c),
+      logger: { exporter: () => () => {}, error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
+    }
+    m.apply(c)
+    // Force a save through the tool; the in-memory (clamped) settings land on disk.
+    await reg.tool.execute(
+      { action: 'add', title: 'cap probe', mode: 'remind' },
+      { agent: { session: { header: { cwd: 'D:\\smoke\\cap' } }, id: 'sess-cap' } },
+    )
+    process.env.DSH_HOME = prev
+    const after = JSON.parse(readFileSync(join(clampHome, 'todo-board', 'board.json'), 'utf8')).settings
+    assert.equal(after.maxTurnSessions, 10, 'a spawn cap of ' + label + ' falls back to the default')
+    rmSync(clampHome, { recursive: true, force: true })
+  }
+  rmSync(capHome, { recursive: true, force: true })
+  console.log('cap     OK')
+}
 
 rmSync(home, { recursive: true, force: true })
 console.log('\nall host-half smoke checks passed')
