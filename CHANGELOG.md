@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.13.5
+
+**修 issue #2：`approval: 'never'` 下写板子必然失败——但按「只看 policy」修会把沙箱绕过去。**
+
+- **问题。** 预设 `danger-full-access` = (沙箱 `danger-full-access`, 审批 `never`)。`never` 的规则是「需要审批的动作一律拒绝，连弹窗都没有」，而本插件的门无条件返回 `{kind:'ask'}`，于是 `add` / `update` / `reorder` / `dispatch` / `schedule` 全部报 `the user rejected tool "todo_board"`——**用户从没见过任何审批框**。无人值守的队列因此连「把下一步写进板子」都做不到。
+- **issue 给的修法是 `effectivePolicy(session) === 'never'` 就 `return next()`。** 机制是对的（服务名 `approval`、方法名 `effectivePolicy`、`never` → `decide()` 直接 `rejected`，逐条对着 0.2.1-rc.2 源码核过），**但范围太宽**：`sandbox` / `approval` 是三个独立旋钮里的两个，`never` 完全可以配 `read-only` / `workspace-write`（预设显示 `custom`）。而本插件写 `board.json` 用的是**宿主权限、不经过 shell 沙箱**——沙箱受限时审批门是模型与这个文件之间唯一的东西。照那个改法，等于在受限沙箱下凭空开出一条宿主写通道。
+- **改成两个条件同时成立才放行**：审批档 `never` **且** 沙箱是 `danger-full-access`。两个值分别取自**各自最权威的那一侧**，都不靠预设名猜：
+  - **沙箱**：把 `permissionPresets.current(session)` 返回的预设名用 `resolve` / `specOf` 解析回该预设的组合，只比 **`sandbox` 字段的值**。**为什么不直接比名字**：`presets` 是 `permissionPresets` 配置里的**一张表**（它自己的 Config schema 里就有 `presets`），名字只是标签，部署方有权把 `danger-full-access` 这个键指向别的组合；比名字在那样的表下会误判成「完全访问」。
+  - **审批档**：只从 `approval.effectivePolicy(session)` 读，**不从预设组合里读**（`dsh-experimental-auto-review` 读的是同一个 `current()`，但那是问"哪个预设"，不是"要不要弹框"）。`current()` 返回的是**预设的定义**而非旋钮的实时值：你先选 `auto`、之后把审批档改成 `never`，`derive()` 仍返回 `auto`，而 `auto` 的定义永远写着 `approval: ask`——拿这个字段当审批档，会把一个**真的**「完全访问 + never」的会话一直拒掉（这不是理论情形：`auto` 父会话派生的子会话就带着 `permission/preset: 'auto'` + 沙箱完全访问 + `approval/policy: 'never'`）。沙箱字段没有这个问题：`derive()` 的每个分支要么是按沙箱匹配上的，要么又显式复查过一次。
+  - **放行的只是本插件的门，不是自动审查**：预设显示 `auto` 时，审查那一层仍先跑一遍 LLM 风险评估，且它拒了就是最终裁决（`never` 下无人在场回答）。想要写板子完全不被打断就得用 `danger-full-access` 预设本身——README 里写明了这一点。
+  - **为什么完全访问下放行反而更安全**：沙箱已是 `danger-full-access` 时模型本来就能用文件工具直接改 `board.json`（预设自己的说明就是「完全文件访问，不弹审批框」）。硬要它走审批只会把它逼去手改 JSON——跳过参数校验、跳过 `seq` 计数、跳过原子替换。
+  - **`never` + 受限沙箱仍然拒绝**，但不再冒充「用户拒绝了」：改返回 `{kind:'deny', reason}`，错误里点名 `never`、说明沙箱没放开、并给出改回 `workspace-write` 或手动操作面板的出路。`deny` 的 `reason` 会被 `dsh-tools` 原样回传给模型（`lib/index.js:3322`）。
+  - **读不出来就照旧问**：`permissionState()` 在投影未注册时会**抛错**（真机日志里就有 `permissions session projection is not registered`），服务也可能不在。所有失败路径一律当作「无法证明弹框不可能」，继续 `ask`；绝不会被误读成「可以放行」。
+- **测试。**
+  - 新增 `tools/check-approval-guard.mjs`（10 个变异，接进 `npm run guard`）。其中**第 1 个变异就是 issue 的原始提案**（改掉沙箱那一半、只看 policy），第 2 个是"直接比预设名"这个更诱人的简化，第 3 个则是**镜像方向**的错：把审批那一半也改成从预设组合里读（单看代码很像"更严格"，实际会拒掉真的完全访问会话）——三条都必须被抓，这条守卫的作用就是证明这套测试能区分「按值判定」和「按名字 / 只看 policy / 从定义里读审批」这三种判定。
+  - 守卫跑 `check-live` 而不是 `smoke`：这些规则的意义在于**真实工具管线**怎么解析门，而 `smoke` 是直接调监听器的。锚点全部写成单行（`lib/index.js` 通篇 CRLF，用 `\n` 写的多行锚点会静默匹配不到，那种守卫会「通过」却什么也没测），并且**先验证每个锚点在文件里恰好出现一次**，否则拒绝运行。
+  - 新增 `tools/check-permission-derive.mjs`（接进 `npm test`）：这条规则建立在「解析出来的预设组合里的 `sandbox` 一定等于真实沙箱」之上，而那是 **DSH 的行为**，不是本插件的假设就能算数的。它加载**真实的** `dsh-permission-presets`，用真实原型在「3 种沙箱 × 2 种审批档 × 5 种预设选择 × 3 张预设表」共 90 个状态上跑一遍 `derive()`，断言放行条件成立时真实沙箱**一定**是完全访问（本机 10 放行 / 80 拒绝，无一次误放行）；顺带钉住门所读的 `current` / `resolve` / `specOf` / `effectivePolicy` 都还在。三张表里有一张是**把 `danger-full-access` 这个键改指向受限沙箱**的——它同时证明了「比名字会误判」不是理论担忧（该表下 `derive()` 真的会对着 `workspace-write` 会话返回 `"danger-full-access"`）。
+  - `check-live` 的审批桩补上 `effectivePolicy()` 与可切换的 `permissionPresets`（`current` / `resolve` / `specOf`），新增 9 组断言：完全访问 + `never` 不弹框且**真的没有问**（此时桩的裁决仍是 `rejected`，所以「没问」是被间接证明的）、受限沙箱仍拒且理由点名 policy、投影抛错仍拒、policy 抛错退回询问、**完全访问 + `ask` 照常弹框**、**预设表把 `danger-full-access` 这个键改指向受限沙箱时不放行**（钉住"不能比名字"）、**`auto` + `never` 仍放行**（钉住"审批不能从预设定义里读"）、**只有 `specOf` 没有 `resolve` 的构建仍能解析**（否则回退分支是死代码）。
+
 ## 0.13.4
 
 **三处过度约束松绑，外加一个「计划 20 步、却只派 10 步」的不一致。**

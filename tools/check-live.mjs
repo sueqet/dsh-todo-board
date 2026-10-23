@@ -94,10 +94,23 @@ const promptStub = {
  */
 const approvalCalls = []
 let approvalVerdict = 'unavailable'
+
+/**
+ * The session's approval POLICY, which is a different question from the verdict
+ * for one call. Under `never`, `dsh-user-approval` rejects before consulting any
+ * answerer, so an `ask` is a guaranteed denial rather than a question. Kept
+ * separately controllable because the gate must tell those apart.
+ */
+let approvalPolicy = 'ask'
+
 const approvalStub = {
   async request(request) {
     approvalCalls.push({ toolName: request.toolName, reason: request.reason })
     return approvalVerdict
+  },
+  effectivePolicy() {
+    if (approvalPolicy === 'THROWS') throw new Error('approval: policy unreadable')
+    return approvalPolicy
   },
 }
 
@@ -405,6 +418,189 @@ assert.ok(
   'with the user-rejection wording, not ours: ' + rejected.error?.message,
 )
 console.log('live-gate OK — reads and the cheap marks pass, writes ask, deny/grant both honoured')
+
+// -- `never`: precise, not blanket ------------------------------------------
+//
+// `never` is NOT a synonym for "full access". `sandbox` and `approval` are two
+// of the three independent permission knobs, so `never` can sit beside a
+// `read-only` or `workspace-write` sandbox (the derived preset then reads back
+// as `custom`). That distinction is load-bearing here because this plugin
+// writes `board.json` with HOST privileges — the write never passes through the
+// sandbox — so under a restricted sandbox the gate is the only thing between
+// the model and the file. Both halves are pinned below.
+//
+// `approvalVerdict` is still `rejected` here, which is what makes the first
+// assertion strong: if the gate wrongly asked, the call would be DENIED.
+
+let presetName = 'danger-full-access'
+// Mirrors `permissionPresets`'s own table shape: a name resolves to a bundle of
+// the two knob values. `presetSpec` lets a case redefine what a KEY means, which
+// is a thing the real Config schema permits and the reason the gate compares
+// knob values instead of the preset's name.
+const PRESET_SPECS = {
+  'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+  'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+  // `auto`'s bundle documents approval `ask` even after the policy moves to
+  // `never` — see the "auto + never" case below.
+  auto: { sandbox: 'danger-full-access', approval: 'ask' },
+}
+let presetSpec = null
+const permissionPresetsStub = {
+  current() {
+    if (presetName === 'THROWS') {
+      throw new Error('permission: permissions session projection is not registered')
+    }
+    return presetName
+  },
+  resolve(name) {
+    const spec = presetSpec === null ? PRESET_SPECS[name] : presetSpec
+    if (spec === undefined) throw new Error('permission: unknown preset "' + name + '"')
+    return spec
+  },
+  specOf(name) {
+    return presetSpec === null ? PRESET_SPECS[name] : presetSpec
+  },
+}
+root.reflect.provide('permissionPresets', permissionPresetsStub, undefined)
+
+approvalPolicy = 'never'
+presetName = 'danger-full-access'
+const beforeUnrestricted = approvalCalls.length
+const unrestricted = await callTool({ action: 'add', title: '无人值守探针' })
+assert.equal(
+  unrestricted.isError,
+  false,
+  'full file access with prompts disabled lets the write through: ' +
+    JSON.stringify(unrestricted).slice(0, 200),
+)
+assert.equal(
+  approvalCalls.length,
+  beforeUnrestricted,
+  'and it opens no dialog, because that dialog could only ever be auto-rejected',
+)
+
+presetName = 'workspace-write'
+const beforeRestricted = approvalCalls.length
+const restricted = await callTool({ action: 'add', title: '不该落盘的探针' })
+assert.equal(
+  restricted.isError,
+  true,
+  'prompts disabled over a RESTRICTED sandbox still refuses the write',
+)
+assert.ok(
+  String(restricted.error?.message ?? '').includes('审批策略是 `never`'),
+  'and the reason names the policy: ' + restricted.error?.message,
+)
+assert.ok(
+  !String(restricted.error?.message ?? '').includes('the user rejected'),
+  'specifically NOT the wording for a dialog the user never saw',
+)
+assert.equal(approvalCalls.length, beforeRestricted, 'and no dead dialog was opened')
+
+const afterRestricted = await callTool({ action: 'list' })
+assert.ok(
+  !afterRestricted.value.todos.some((todo) => todo.title === '不该落盘的探针'),
+  'and nothing reached the board',
+)
+
+// A projection that is not registered is a real, observed failure mode (it is
+// in the shipped logs). It must read as "cannot prove full access", not as one.
+presetName = 'THROWS'
+const unregisteredProjection = await callTool({ action: 'add', title: '投影未注册探针' })
+assert.equal(
+  unregisteredProjection.isError,
+  true,
+  'a throwing preset projection refuses rather than assuming full access',
+)
+
+// The mirror image: an unreadable POLICY must not read as `never` either.
+approvalPolicy = 'THROWS'
+presetName = 'danger-full-access'
+approvalVerdict = 'allowed-once'
+const beforeUnreadable = approvalCalls.length
+const unreadablePolicy = await callTool({ action: 'add', title: '策略读不到探针' })
+assert.equal(
+  unreadablePolicy.isError,
+  false,
+  'an unreadable policy falls back to asking instead of deciding on its own',
+)
+assert.equal(
+  approvalCalls.length,
+  beforeUnreadable + 1,
+  'and the channel really was asked — that is what fail-closed means here',
+)
+
+// Full access ALONE must not skip the ask: only full access AND `never` does.
+// Without this, a redeployed preset table could silently widen the bypass.
+approvalPolicy = 'ask'
+presetName = 'danger-full-access'
+const beforeAskFull = approvalCalls.length
+const askWithFullAccess = await callTool({ action: 'add', title: 'ask 与完全访问探针' })
+assert.equal(askWithFullAccess.isError, false, 'policy ask still works normally')
+assert.equal(
+  approvalCalls.length,
+  beforeAskFull + 1,
+  'and full access alone does NOT skip the ask',
+)
+
+// The `auto` branch. `derive()` deliberately keeps returning the live `auto`
+// preset once the policy moves to `never` ("a still-selected Auto also matches
+// the `never` approval policy"), while `auto`'s bundle goes on documenting
+// approval `ask`. So the approval half MUST come from the policy service, not
+// from the bundle — a gate that read it off the bundle would keep refusing a
+// session that really is full-access + never. The sandbox half is still fine to
+// read there: `derive()` only returns `auto` when the sandbox matches.
+approvalPolicy = 'never'
+presetName = 'auto'
+const beforeAutoWithNever = approvalCalls.length
+const autoWithNever = await callTool({ action: 'add', title: 'auto 与 never 探针' })
+assert.equal(
+  autoWithNever.isError,
+  false,
+  'auto over full access with the policy at never proceeds: ' + JSON.stringify(autoWithNever).slice(0, 200),
+)
+assert.equal(approvalCalls.length, beforeAutoWithNever, 'and without opening a dialog')
+
+// The preset NAME is not the thing being trusted. `permissionPresets`'s Config
+// schema declares `presets` as a table, so a deployment may point the key
+// `danger-full-access` at any bundle it likes; the gate must read the knob
+// values. Here the key keeps its reassuring name while granting only a
+// `workspace-write` sandbox, which must NOT unlock the bypass.
+approvalPolicy = 'never'
+presetName = 'danger-full-access'
+presetSpec = { sandbox: 'workspace-write', approval: 'never' }
+const beforeRedefined = approvalCalls.length
+const redefinedPreset = await callTool({ action: 'add', title: '被重定义的预设探针' })
+assert.equal(
+  redefinedPreset.isError,
+  true,
+  'a "danger-full-access" key that carries a restricted sandbox does NOT unlock the write',
+)
+assert.ok(
+  String(redefinedPreset.error?.message ?? '').includes('审批策略是 `never`'),
+  'and it is refused for the policy reason, like any other restricted sandbox',
+)
+assert.equal(approvalCalls.length, beforeRedefined, 'with no dialog opened')
+presetSpec = null
+
+// `resolve` and `specOf` are the same lookup with different error behaviour, so
+// a build offering only the non-throwing one must still resolve. Without this
+// the fallback is untested code that only a future DSH would ever reach.
+const resolveBackup = permissionPresetsStub.resolve
+delete permissionPresetsStub.resolve
+approvalPolicy = 'never'
+presetName = 'danger-full-access'
+const viaSpecOf = await callTool({ action: 'add', title: 'specOf 回退探针' })
+assert.equal(
+  viaSpecOf.isError,
+  false,
+  'a build with only specOf still reads the knob values: ' + JSON.stringify(viaSpecOf).slice(0, 200),
+)
+permissionPresetsStub.resolve = resolveBackup
+
+console.log(
+  'live-never OK — full access + never proceeds, a restricted sandbox still refuses, unreadable knobs keep asking',
+)
 
 // -- the fence on a really-injected route ------------------------------------
 
